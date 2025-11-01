@@ -29,7 +29,10 @@ pio device monitor
 pio run --target clean
 ```
 
-**重要**: PlatformIO 會自動管理相依套件，無需手動安裝 Arduino 函式庫。
+**重要**:
+
+- PlatformIO 會自動管理相依套件，無需手動安裝 Arduino 函式庫
+- **禁止使用 PowerShell 指令**：不可直接在程式碼中執行 PowerShell 命令（如 `platformio`、`pio` 等），應使用 VS Code 的 PlatformIO 擴充功能操作
 
 ## 建置配置 (platformio.ini)
 
@@ -56,6 +59,28 @@ platformio.ini        # 建置配置與相依套件定義
 3. **序列輸出**: 使用 `Serial` 物件，速率固定為 115200 baud
 4. **感測器取樣**: 目標頻率 100 Hz
 
+## AI 協助開發規範
+
+### 禁止的操作
+
+- **禁止執行終端機指令**：不可使用 `run_in_terminal` 工具執行 `pio`、`platformio` 等指令
+- **使用 VS Code UI**：所有編譯、上傳、監控操作應透過 VS Code 的 PlatformIO 擴充功能完成
+
+### 資料查證與搜尋
+
+- **優先使用 Web Search**：需要查詢技術資料、函式庫文件、硬體規格時，應使用 `web search` 工具進行即時資料查證
+- **適用場景**：
+  - 查詢 ESP32-C3 或 MPU-6050 技術規格
+  - 尋找 Arduino 函式庫使用範例
+  - 查證 I2C 通訊協定細節
+  - 搜尋感測器校準方法
+  - 確認最新的函式庫版本與相容性
+
+### 函式庫匯入
+
+- **必須使用 GitHub 超連結**：在 `platformio.ini` 中使用完整的 GitHub 倉庫 URL
+- **禁止使用官方套件名稱**：不可使用 PlatformIO Registry 的套件名稱
+
 ## 開發工作流程
 
 ### 首次上傳注意事項
@@ -70,8 +95,9 @@ ESP32-C3 Super Mini 首次上傳可能需要手動進入 bootloader：
 ### 除錯方法
 
 - 使用 `Serial.println()` 進行除錯輸出
-- 透過 `pio device monitor` 查看即時輸出
+- 透過 VS Code PlatformIO 的 Serial Monitor 查看即時輸出
 - PlatformIO 的 Debug 功能需要額外硬體 (JTAG)
+- **注意**：不要在終端機手動執行 `pio device monitor` 指令
 
 ## 專案階段與功能
 
@@ -93,7 +119,20 @@ ESP32-C3 Super Mini 首次上傳可能需要手動進入 bootloader：
 
 ## 新增相依套件
 
-在 `platformio.ini` 的 `[env]` 區塊加入：
+**函式庫匯入規範**：
+
+- **必須使用 GitHub 超連結**：在 `platformio.ini` 中使用完整的 GitHub 倉庫 URL
+- **禁止使用官方套件名稱**：不可使用 PlatformIO Registry 的套件名稱（如 `adafruit/Adafruit MPU6050`）
+
+**正確範例**（使用 GitHub URL）：
+
+```ini
+lib_deps =
+    https://github.com/ElectronicCats/mpu6050.git
+    https://github.com/adafruit/Adafruit_Sensor.git
+```
+
+**錯誤範例**（禁止使用）：
 
 ```ini
 lib_deps =
@@ -101,8 +140,18 @@ lib_deps =
     adafruit/Adafruit Unified Sensor@^1.1.14
 ```
 
+**匯入步驟**：
+
+1. 在 GitHub 搜尋所需函式庫
+2. 確認函式庫品質（star 數、更新頻率、相容性）
+3. 複製 GitHub 倉庫 URL（`.git` 結尾）
+4. 加入 `platformio.ini` 的 `lib_deps` 區塊
+
 ## 常見問題
 
 - **上傳失敗**: 檢查 USB 連線，嘗試手動進入 bootloader
 - **序列埠無輸出**: 確認 `monitor_speed` 設定為 115200
-- **編譯錯誤**: 執行 `pio run --target clean` 清理後重新建置
+- **編譯錯誤**: 使用 VS Code PlatformIO 的 Clean 功能清理後重新建置
+- **需要技術資料**: 使用 Web Search 查詢最新文件與範例
+
+**重要提醒**：所有操作應透過 VS Code 的 PlatformIO 擴充功能，避免直接執行命令列指令。
