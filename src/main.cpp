@@ -22,6 +22,23 @@ float kneeX = 0.0; // 左右位置
 float kneeY = 0.0; // 前後位置
 float kneeZ = 0.0; // 上下位置（負值表示在髖關節下方）
 
+// 校正變數
+bool isCalibrated = false;
+float calibrationAngle = 0.0; // 校正用的初始角度
+float calibrationSum = 0.0;   // 累積角度總和
+int calibrationCount = 0;     // 校正樣本數量
+unsigned long calibrationStartTime = 0;
+
+// 初始座標（用於相對位移計算）
+float initialKneeY = 0.0;
+float initialKneeZ = 0.0;
+
+// 穩定度檢測變數
+float prevAngle = 0.0;
+int stableCount = 0;
+bool isStable = false;
+unsigned long startTime = 0;
+
 // I2C 掃描函數
 void scanI2C()
 {
@@ -117,10 +134,20 @@ void setup()
   Serial.println("\n追蹤目標：膝蓋位置變化");
   Serial.println("  0° = 大腿垂直向下（站立）");
   Serial.println(" 90° = 大腿水平向前（膝蓋抬到最高）");
-  Serial.println("\n開始讀取...\n");
+  Serial.println("\n⏱️  數值穩定建議時間：");
+  Serial.println("  • 靜態測量（站立）：等待 3-5 秒");
+  Serial.println("  • 動態測量（抬腿）：0.5-1 秒即可");
+  Serial.println("  • 長時間追蹤：建議不超過 60 秒\n");
+
+  Serial.println("╔════════════════════════════════════════╗");
+  Serial.println("║  🔧 自動校正中...                     ║");
+  Serial.println("║  請保持站立姿勢不動 3 秒               ║");
+  Serial.println("╚════════════════════════════════════════╝\n");
 
   lastTime = millis();
-  delay(2000);
+  startTime = millis();
+  calibrationStartTime = millis();
+  delay(100);
 }
 
 void loop()
@@ -165,12 +192,56 @@ void loop()
     if (thighAngle < -180.0)
       thighAngle += 360.0;
 
+    // ===== 自動校正（前 3 秒）=====
+    if (!isCalibrated)
+    {
+      unsigned long calibrationElapsed = currentTime - calibrationStartTime;
+
+      if (calibrationElapsed < 3000) // 前 3 秒收集數據
+      {
+        calibrationSum += thighAngle;
+        calibrationCount++;
+
+        // 顯示校正進度
+        if (calibrationCount % 10 == 0)
+        { // 每 10 次顯示一次
+          Serial.printf("⏳ 校正中... %.1f 秒 (樣本數: %d)\n",
+                        calibrationElapsed / 1000.0, calibrationCount);
+        }
+      }
+      else // 3 秒後完成校正
+      {
+        calibrationAngle = calibrationSum / calibrationCount;
+        isCalibrated = true;
+
+        // 計算並記錄初始座標
+        float initAngleRad = 0.0;                         // 校正後角度為 0
+        initialKneeY = THIGH_LENGTH * sin(initAngleRad);  // 應該接近 0
+        initialKneeZ = -THIGH_LENGTH * cos(initAngleRad); // 應該是 -45
+
+        Serial.println("\n╔════════════════════════════════════════╗");
+        Serial.println("║  ✓ 校正完成！                         ║");
+        Serial.printf("║  校正角度偏移: %6.2f°              ║\n", calibrationAngle);
+        Serial.println("║  初始座標已設定為 (0, 0, 0)           ║");
+        Serial.printf("║  實際初始位置: Y=%.1f, Z=%.1f cm   ║\n", initialKneeY, initialKneeZ);
+        Serial.println("╚════════════════════════════════════════╝\n");
+        Serial.println("📍 座標顯示說明：");
+        Serial.println("   • 顯示的是「相對於初始位置」的變化");
+        Serial.println("   • 站立時應該接近 (0, 0, 0)");
+        Serial.println("   • 抬腿時會看到 Y 和 Z 的變化\n");
+        Serial.println("開始正常測量...\n");
+      }
+    }
+
+    // ===== 應用校正 =====
+    float calibratedAngle = thighAngle - calibrationAngle;
+
     // ===== 計算膝蓋座標（相對於髖關節）=====
     // 原點 = 髖關節 (0, 0, 0)
     // 目標 = 膝蓋位置 (x, y, z)
 
-    // 轉換角度為弧度
-    float angleRad = thighAngle * PI / 180.0;
+    // 轉換角度為弧度（使用校正後的角度）
+    float angleRad = calibratedAngle * PI / 180.0;
 
     // 座標計算（極坐標轉直角座標）
     // 假設：0° = 大腿垂直向下，90° = 大腿水平向前
@@ -178,14 +249,75 @@ void loop()
     kneeY = THIGH_LENGTH * sin(angleRad);  // 前後位移（正值 = 往前）
     kneeZ = -THIGH_LENGTH * cos(angleRad); // 上下位移（負值 = 往下，0° 時在髖關節正下方）
 
+    // ===== 計算相對於初始位置的變化 =====
+    float deltaY = kneeY - initialKneeY; // 相對前後位移
+    float deltaZ = kneeZ - initialKneeZ; // 相對上下位移
+
+    // ===== 顯示數據（只在校正完成後）=====
+    if (!isCalibrated)
+    {
+      delay(100);
+      return; // 校正期間不顯示其他數據
+    }
+
+    // ===== 穩定度檢測 =====
+    float angleDiff = abs(calibratedAngle - prevAngle);
+    if (angleDiff < 0.5)
+    { // 角度變化小於 0.5 度
+      stableCount++;
+    }
+    else
+    {
+      stableCount = 0;
+      isStable = false;
+    }
+
+    // 連續 30 次測量（約 3 秒）角度穩定，判定為穩定
+    if (stableCount >= 30 && !isStable)
+    {
+      isStable = true;
+      Serial.println("\n✓ 數值已穩定！現在可以進行準確測量。\n");
+    }
+
+    prevAngle = calibratedAngle; // 使用校正後的角度
+
+    // 計算已運行時間
+    float elapsedTime = (currentTime - startTime) / 1000.0;
+
     // ===== 顯示結果 =====
     Serial.println("╔════════════════════════════════════════╗");
-    Serial.printf("║ 大腿抬起角度： %6.1f°              ║\n", abs(thighAngle));
+    Serial.printf("║ 大腿抬起角度： %6.1f°              ║\n", abs(calibratedAngle));
     Serial.println("╠════════════════════════════════════════╣");
-    Serial.println("║          膝蓋座標 (cm)                 ║");
-    Serial.printf("║   X (左右): %7.1f                  ║\n", kneeX);
-    Serial.printf("║   Y (前後): %7.1f                  ║\n", kneeY);
-    Serial.printf("║   Z (上下): %7.1f                  ║\n", kneeZ);
+    Serial.println("║     相對位移 (相對初始位置)           ║");
+    Serial.printf("║   ΔX (左右): %7.1f                 ║\n", 0.0);
+    Serial.printf("║   ΔY (前後): %7.1f                 ║\n", deltaY);
+    Serial.printf("║   ΔZ (上下): %7.1f                 ║\n", deltaZ);
+    Serial.println("╠════════════════════════════════════════╣");
+    Serial.println("║     絕對座標 (相對髖關節)             ║");
+    Serial.printf("║   X: %7.1f  Y: %7.1f  Z: %7.1f  ║\n", kneeX, kneeY, kneeZ);
+    Serial.println("╠════════════════════════════════════════╣");
+
+    // 顯示穩定度指示器
+    Serial.print("║ 穩定度： ");
+    if (isStable)
+    {
+      Serial.println("✓ 已穩定                ║");
+    }
+    else
+    {
+      Serial.printf("⏳ 穩定中... (%d/30)        ║\n", stableCount);
+    }
+
+    // 顯示運行時間
+    Serial.printf("║ 運行時間： %.1f 秒", elapsedTime);
+    if (elapsedTime > 60)
+    {
+      Serial.println(" (建議重啟) ║");
+    }
+    else
+    {
+      Serial.println("              ║");
+    }
     Serial.println("╠════════════════════════════════════════╣");
 
     // 顯示對應的抬腿程度
