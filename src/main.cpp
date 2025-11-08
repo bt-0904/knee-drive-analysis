@@ -1,165 +1,228 @@
 #include <Arduino.h>
 #include <Wire.h>
-#include <MPU6050.h>
+#include "ICM_20948.h" // SparkFun ICM-20948 函式庫
 
-// MPU6050 物件
-MPU6050 mpu;
+// ICM-20948 物件 (使用 I2C)
+ICM_20948_I2C imu;
 
-// 加速度最大值追蹤
-float maxAccelX = 0.0;
-float maxAccelY = 0.0;
-float maxAccelZ = 0.0;
-float maxAccelTotal = 0.0; // 三軸合成加速度最大值
+// I2C 設定
+#define SDA_PIN 5 // ESP32-C3 GPIO5
+#define SCL_PIN 6 // ESP32-C3 GPIO6
 
-// 膝蓋座標追蹤（位置積分）
-float velocityX = 0.0; // 速度 (m/s)
-float velocityY = 0.0;
-float velocityZ = 0.0;
-float positionX = 0.0; // 位置 (cm)
-float positionY = 0.0;
-float positionZ = 0.0;
+// 大腿參數（感測器綁在大腿上）
+#define THIGH_LENGTH 45.0 // 大腿長度 (公分)，從髖關節到膝蓋
 
-// 最大位移追蹤
-float maxPosX = 0.0;
-float maxPosY = 0.0;
-float maxPosZ = 0.0;
+// 角度追蹤變數（互補濾波）
+float thighAngle = 0.0; // 大腿抬起角度（0° = 垂直向下，90° = 水平向前）
+float roll = 0.0;       // 橫滾角（左右偏移）
+unsigned long lastTime = 0;
 
-// 時間追蹤
-unsigned long lastUpdateTime = 0;
+// 膝蓋座標（相對於髖關節）
+float kneeX = 0.0; // 左右位置
+float kneeY = 0.0; // 前後位置
+float kneeZ = 0.0; // 上下位置（負值表示在髖關節下方）
+
+// I2C 掃描函數
+void scanI2C()
+{
+  Serial.println("正在掃描 I2C 裝置...");
+  byte count = 0;
+
+  for (byte i = 1; i < 127; i++)
+  {
+    Wire.beginTransmission(i);
+    if (Wire.endTransmission() == 0)
+    {
+      Serial.print("發現裝置位址: 0x");
+      if (i < 16)
+        Serial.print("0");
+      Serial.println(i, HEX);
+      count++;
+    }
+  }
+
+  if (count == 0)
+    Serial.println("⚠️ 未發現任何 I2C 裝置！請檢查接線。");
+  else
+    Serial.printf("✓ 共發現 %d 個 I2C 裝置\n", count);
+  Serial.println();
+}
 
 void setup()
 {
   // 初始化序列埠 (115200 baud)
   Serial.begin(115200);
-  while (!Serial)
+  delay(1000); // 等待穩定
+  Serial.println("\n=== ICM-20948 感測器初始化 ===");
+
+  // 初始化 I2C (ESP32-C3 Super Mini: SDA=GPIO5, SCL=GPIO6)
+  Wire.begin(SDA_PIN, SCL_PIN);
+  Wire.setClock(100000); // 降低 I2C 時脈至 100kHz (標準模式)
+  delay(100);
+
+  // 掃描 I2C 裝置
+  scanI2C();
+
+  // 嘗試兩個可能的 I2C 位址
+  Serial.println("正在初始化 ICM-20948...");
+
+  bool initialized = false;
+  uint8_t addressToTry[] = {1, 0}; // 先試 0x69，再試 0x68
+  int addressIndex = 0;
+
+  while (!initialized && addressIndex < 2)
   {
-    delay(10); // 等待序列埠準備就緒
+    uint8_t currentAddress = addressToTry[addressIndex];
+    Serial.printf("嘗試位址: 0x%02X...\n", currentAddress ? 0x69 : 0x68);
+
+    imu.begin(Wire, currentAddress);
+    delay(100);
+
+    Serial.print("  初始化狀態: ");
+    Serial.println(imu.statusString());
+
+    if (imu.status == ICM_20948_Stat_Ok)
+    {
+      initialized = true;
+      Serial.printf("✓ ICM-20948 連線成功！(位址: 0x%02X)\n", currentAddress ? 0x69 : 0x68);
+    }
+    else
+    {
+      addressIndex++;
+      if (addressIndex < 2)
+      {
+        Serial.println("  失敗，嘗試下一個位址...");
+        delay(500);
+      }
+    }
   }
-  Serial.println("\n=== MPU-6050 感測器初始化 ===");
 
-  // 初始化 I2C (ESP32-C3 Super Mini: SDA=GPIO8, SCL=GPIO9)
-  Wire.begin(8, 9);
-
-  // 初始化 MPU6050
-  Serial.println("正在初始化 MPU6050...");
-  mpu.initialize();
-
-  // 檢查連線狀態
-  if (mpu.testConnection())
+  if (!initialized)
   {
-    Serial.println("✓ MPU6050 連線成功！");
-  }
-  else
-  {
-    Serial.println("✗ MPU6050 連線失敗，請檢查接線");
+    Serial.println("\n✗ ICM-20948 初始化失敗！");
+    Serial.println("\n請檢查：");
+    Serial.println("1. VCC → 3.3V");
+    Serial.println("2. GND → GND");
+    Serial.println("3. SDA → GPIO5");
+    Serial.println("4. SCL → GPIO6");
+    Serial.println("5. 模組是否正常供電（檢查電源燈）");
+    Serial.println("\n程式停止運行。");
     while (1)
-      ; // 停止程式
+      delay(1000);
   }
 
-  // 設定感測器範圍
-  mpu.setFullScaleAccelRange(MPU6050_ACCEL_FS_2); // ±2g
-  mpu.setFullScaleGyroRange(MPU6050_GYRO_FS_250); // ±250°/s
+  Serial.println("\n=== 大腿抬起角度追蹤系統 ===");
+  Serial.println("髖關節位置 = 原點 (0, 0, 0)");
+  Serial.printf("大腿長度 = %.1f cm\n", THIGH_LENGTH);
+  Serial.println("\n追蹤目標：膝蓋位置變化");
+  Serial.println("  0° = 大腿垂直向下（站立）");
+  Serial.println(" 90° = 大腿水平向前（膝蓋抬到最高）");
+  Serial.println("\n開始讀取...\n");
 
-  Serial.println("\n--- 感測器設定 ---");
-  Serial.println("加速度範圍: ±2g");
-  Serial.println("陀螺儀範圍: ±250°/s");
-  Serial.println("\n開始讀取資料...\n");
-
-  delay(1000);
-
-  // 初始化時間
-  lastUpdateTime = millis();
+  lastTime = millis();
+  delay(2000);
 }
 
 void loop()
 {
-  // 記錄開始時間
-  unsigned long startTime = millis();
+  // 檢查是否有新數據
+  if (imu.dataReady())
+  {
+    // 計算時間差
+    unsigned long currentTime = millis();
+    float deltaTime = (currentTime - lastTime) / 1000.0; // 轉換為秒
+    lastTime = currentTime;
 
-  // 計算時間差（秒）
-  float deltaTime = (startTime - lastUpdateTime) / 1000.0;
-  lastUpdateTime = startTime;
+    // 讀取感測器數據
+    imu.getAGMT();
 
-  // 讀取加速度與陀螺儀原始數據
-  int16_t ax, ay, az;
-  int16_t gx, gy, gz;
+    // 加速度數據 (單位: g)
+    float accelX = imu.accX();
+    float accelY = imu.accY();
+    float accelZ = imu.accZ();
 
-  mpu.getAcceleration(&ax, &ay, &az);
-  mpu.getRotation(&gx, &gy, &gz);
+    // 陀螺儀數據 (單位: °/s)
+    float gyroX = imu.gyrX();
+    float gyroY = imu.gyrY();
+    float gyroZ = imu.gyrZ();
 
-  // 轉換為實際單位
-  float accelX = ax / 16384.0; // 轉換為 g (±2g範圍)
-  float accelY = ay / 16384.0;
-  float accelZ = az / 16384.0;
+    // ===== 計算大腿抬起角度（互補濾波）=====
 
-  float gyroX = gx / 131.0; // 轉換為 °/s (±250°/s範圍)
-  float gyroY = gy / 131.0;
-  float gyroZ = gz / 131.0;
+    // 方法 1：用加速度計算角度（利用重力方向）
+    // 假設感測器安裝在大腿上，Y 軸沿大腿方向
+    float accelAngle = atan2(accelY, accelZ) * 180.0 / PI;
 
-  // 讀取溫度
-  int16_t temperature = mpu.getTemperature();
-  float tempC = temperature / 340.0 + 36.53; // 轉換為攝氏度
+    // 方法 2：用陀螺儀積分（角速度 × 時間）
+    float gyroAngle = thighAngle + gyroX * deltaTime;
 
-  // 更新加速度最大值（使用絕對值）
-  float absAccelX = abs(accelX);
-  float absAccelY = abs(accelY);
-  float absAccelZ = abs(accelZ);
+    // 方法 3：互補濾波（融合兩者）
+    float alpha = 0.96; // 96% 信任陀螺儀，4% 信任加速度計
+    thighAngle = alpha * gyroAngle + (1 - alpha) * accelAngle;
 
-  if (absAccelX > maxAccelX)
-    maxAccelX = absAccelX;
-  if (absAccelY > maxAccelY)
-    maxAccelY = absAccelY;
-  if (absAccelZ > maxAccelZ)
-    maxAccelZ = absAccelZ;
+    // 確保角度在 -180° 到 180° 範圍內
+    if (thighAngle > 180.0)
+      thighAngle -= 360.0;
+    if (thighAngle < -180.0)
+      thighAngle += 360.0;
 
-  // 計算三軸合成加速度（向量長度）
-  float accelTotal = sqrt(accelX * accelX + accelY * accelY + accelZ * accelZ);
-  if (accelTotal > maxAccelTotal)
-    maxAccelTotal = accelTotal;
+    // ===== 計算膝蓋座標（相對於髖關節）=====
+    // 原點 = 髖關節 (0, 0, 0)
+    // 目標 = 膝蓋位置 (x, y, z)
 
-  // ===== 膝蓋座標計算 =====
-  // 移除重力影響（假設 Z 軸向上，靜止時 Z = 1g）
-  float accelX_noG = accelX;
-  float accelY_noG = accelY;
-  float accelZ_noG = accelZ - 1.0; // 移除重力加速度
+    // 轉換角度為弧度
+    float angleRad = thighAngle * PI / 180.0;
 
-  // 轉換單位：g → m/s² (1g = 9.81 m/s²)
-  float accelX_ms2 = accelX_noG * 9.81;
-  float accelY_ms2 = accelY_noG * 9.81;
-  float accelZ_ms2 = accelZ_noG * 9.81;
+    // 座標計算（極坐標轉直角座標）
+    // 假設：0° = 大腿垂直向下，90° = 大腿水平向前
+    kneeX = 0.0;                           // 左右不動（簡化）
+    kneeY = THIGH_LENGTH * sin(angleRad);  // 前後位移（正值 = 往前）
+    kneeZ = -THIGH_LENGTH * cos(angleRad); // 上下位移（負值 = 往下，0° 時在髖關節正下方）
 
-  // 積分計算速度 (v = v0 + a*dt)
-  velocityX += accelX_ms2 * deltaTime;
-  velocityY += accelY_ms2 * deltaTime;
-  velocityZ += accelZ_ms2 * deltaTime;
+    // ===== 顯示結果 =====
+    Serial.println("╔════════════════════════════════════════╗");
+    Serial.printf("║ 大腿抬起角度： %6.1f°              ║\n", abs(thighAngle));
+    Serial.println("╠════════════════════════════════════════╣");
+    Serial.println("║          膝蓋座標 (cm)                 ║");
+    Serial.printf("║   X (左右): %7.1f                  ║\n", kneeX);
+    Serial.printf("║   Y (前後): %7.1f                  ║\n", kneeY);
+    Serial.printf("║   Z (上下): %7.1f                  ║\n", kneeZ);
+    Serial.println("╠════════════════════════════════════════╣");
 
-  // 速度衰減（補償積分漂移）
-  velocityX *= 0.98;
-  velocityY *= 0.98;
-  velocityZ *= 0.98;
+    // 顯示對應的抬腿程度
+    float absAngle = abs(thighAngle);
+    Serial.print("║ 狀態： ");
+    if (absAngle < 10)
+    {
+      Serial.println("站立（大腿垂直）          ║");
+    }
+    else if (absAngle < 30)
+    {
+      Serial.println("輕微抬腿                  ║");
+    }
+    else if (absAngle < 60)
+    {
+      Serial.println("中度抬腿                  ║");
+    }
+    else if (absAngle < 85)
+    {
+      Serial.println("高抬腿                    ║");
+    }
+    else if (absAngle < 100)
+    {
+      Serial.println("膝蓋抬到最高點（接近水平）║");
+    }
+    else
+    {
+      Serial.println("過度抬腿（超過水平）      ║");
+    }
 
-  // 積分計算位置 (s = s0 + v*dt) - 轉換為公分
-  positionX += velocityX * deltaTime * 100.0;
-  positionY += velocityY * deltaTime * 100.0;
-  positionZ += velocityZ * deltaTime * 100.0;
-
-  // 更新最大位移（使用絕對值）
-  float absPosX = abs(positionX);
-  float absPosY = abs(positionY);
-  float absPosZ = abs(positionZ);
-
-  if (absPosX > maxPosX)
-    maxPosX = absPosX;
-  if (absPosY > maxPosY)
-    maxPosY = absPosY;
-  if (absPosZ > maxPosZ)
-    maxPosZ = absPosZ;
-
-  // 只顯示 Pos 和 Gyro
-  Serial.print("\r");
-  Serial.printf("Pos[cm] X:%6.1f Y:%6.1f Z:%6.1f | ", positionX, positionY, positionZ);
-  Serial.printf("Gyro[°/s] X:%6.1f Y:%6.1f Z:%6.1f     ", gyroX, gyroY, gyroZ);
+    Serial.println("╠════════════════════════════════════════╣");
+    Serial.printf("║ 加速度 | X:%6.3f Y:%6.3f Z:%6.3f ║\n", accelX, accelY, accelZ);
+    Serial.printf("║ 陀螺儀 | X:%6.1f Y:%6.1f Z:%6.1f   ║\n", gyroX, gyroY, gyroZ);
+    Serial.println("╚════════════════════════════════════════╝");
+    Serial.println();
+  }
 
   // 100Hz 取樣頻率 (每10ms讀取一次)
-  delay(10);
+  delay(500); // 改為 100ms，每秒更新 10 次
 }
