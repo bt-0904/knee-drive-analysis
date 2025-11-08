@@ -1,9 +1,27 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include "ICM_20948.h" // SparkFun ICM-20948 函式庫
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
+
+// Wi-Fi 設定
+const char* WIFI_SSID = "Bt";
+const char* WIFI_PASSWORD = "bt_980904";
+
+// MQTT 設定
+const char* MQTT_SERVER = "mqtt.singularinnovation-ai.com";
+const int MQTT_PORT = 1883;
+const char* MQTT_USER = "singular";
+const char* MQTT_PASSWORD = "Singular#1234";
+const char* MQTT_TOPIC = "knee-drive/data";
 
 // ICM-20948 物件 (使用 I2C)
 ICM_20948_I2C imu;
+
+// Wi-Fi 和 MQTT 客戶端
+WiFiClient espClient;
+PubSubClient mqttClient(espClient);
 
 // I2C 設定
 #define SDA_PIN 5 // ESP32-C3 GPIO5
@@ -38,6 +56,51 @@ float prevAngle = 0.0;
 int stableCount = 0;
 bool isStable = false;
 unsigned long startTime = 0;
+
+// Wi-Fi 連線函數
+void connectWiFi() {
+  Serial.println("\n========================================");
+  Serial.println("正在連接 Wi-Fi...");
+  Serial.printf("SSID: %s\n", WIFI_SSID);
+  
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n✓ Wi-Fi 連線成功！");
+    Serial.printf("IP 位址: %s\n", WiFi.localIP().toString().c_str());
+    Serial.printf("訊號強度: %d dBm\n", WiFi.RSSI());
+  } else {
+    Serial.println("\n✗ Wi-Fi 連線失敗！");
+    Serial.println("請檢查 SSID 和密碼設定");
+  }
+  Serial.println("========================================\n");
+}
+
+// MQTT 重連函數
+void reconnectMQTT() {
+  if (!mqttClient.connected()) {
+    Serial.print("正在連接 MQTT...");
+    
+    // 產生唯一的客戶端 ID
+    String clientId = "ESP32-KneeDrive-";
+    clientId += String(random(0xffff), HEX);
+    
+    if (mqttClient.connect(clientId.c_str(), MQTT_USER, MQTT_PASSWORD)) {
+      Serial.println(" ✓ 連線成功！");
+      Serial.printf("Topic: %s\n", MQTT_TOPIC);
+    } else {
+      Serial.printf(" ✗ 失敗，狀態碼: %d\n", mqttClient.state());
+    }
+  }
+}
 
 // I2C 掃描函數
 void scanI2C()
@@ -143,6 +206,20 @@ void setup()
   Serial.println("║  🔧 自動校正中...                     ║");
   Serial.println("║  請保持站立姿勢不動 3 秒               ║");
   Serial.println("╚════════════════════════════════════════╝\n");
+
+  // 連接 Wi-Fi
+  connectWiFi();
+  
+  // 設定 MQTT 伺服器
+  mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
+  mqttClient.setBufferSize(512);  // 增加 MQTT buffer 大小到 512 bytes
+  mqttClient.setKeepAlive(60);
+  mqttClient.setSocketTimeout(30);
+  
+  // 初次連接 MQTT
+  if (WiFi.status() == WL_CONNECTED) {
+    reconnectMQTT();
+  }
 
   lastTime = millis();
   startTime = millis();
@@ -352,6 +429,74 @@ void loop()
     Serial.printf("║ 加速度 | X:%6.3f Y:%6.3f Z:%6.3f ║\n", accelX, accelY, accelZ);
     Serial.printf("║ 陀螺儀 | X:%6.1f Y:%6.1f Z:%6.1f   ║\n", gyroX, gyroY, gyroZ);
     Serial.println("╚════════════════════════════════════════╝");
+
+    // ===== MQTT 資料傳輸 =====
+    // 檢查 Wi-Fi 連線
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("⚠️ Wi-Fi 斷線，嘗試重連...");
+      connectWiFi();
+    }
+    
+    // 檢查 MQTT 連線
+    if (!mqttClient.connected() && WiFi.status() == WL_CONNECTED) {
+      reconnectMQTT();
+    }
+    
+    // 發布資料到 MQTT
+    if (mqttClient.connected()) {
+      // 建立 JSON 文件
+      JsonDocument doc;
+      doc["timestamp"] = currentTime / 1000.0;
+      doc["elapsed_time"] = elapsedTime;
+      doc["angle"] = abs(calibratedAngle);
+      doc["stable"] = isStable;
+      
+      // 相對位移
+      JsonObject delta = doc["delta"].to<JsonObject>();
+      delta["x"] = 0.0;
+      delta["y"] = deltaY;
+      delta["z"] = deltaZ;
+      
+      // 絕對座標
+      JsonObject absolute = doc["absolute"].to<JsonObject>();
+      absolute["x"] = kneeX;
+      absolute["y"] = kneeY;
+      absolute["z"] = kneeZ;
+      
+      // 原始感測器數據
+      JsonObject accel = doc["accel"].to<JsonObject>();
+      accel["x"] = accelX;
+      accel["y"] = accelY;
+      accel["z"] = accelZ;
+      
+      JsonObject gyro = doc["gyro"].to<JsonObject>();
+      gyro["x"] = gyroX;
+      gyro["y"] = gyroY;
+      gyro["z"] = gyroZ;
+      
+      // 序列化 JSON
+      char jsonBuffer[512];
+      size_t jsonSize = serializeJson(doc, jsonBuffer);
+      
+      // 顯示 JSON 大小（除錯用）
+      Serial.printf("JSON 大小: %d bytes\n", jsonSize);
+      
+      // 發布到 MQTT (QoS 0 = 最多一次，不需確認)
+      bool success = mqttClient.publish(MQTT_TOPIC, jsonBuffer, false);
+      
+      if (success) {
+        Serial.println("✓ 資料已發送到 MQTT");
+      } else {
+        Serial.println("✗ MQTT 發送失敗");
+        Serial.printf("  原因: Buffer 大小不足或連線問題\n");
+        Serial.printf("  MQTT 狀態: %d\n", mqttClient.state());
+      }
+    } else {
+      Serial.println("⚠️ MQTT 未連線，資料未發送");
+    }
+    
+    // 保持 MQTT 連線
+    mqttClient.loop();
     Serial.println();
   }
 
