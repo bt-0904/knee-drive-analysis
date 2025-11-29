@@ -71,6 +71,66 @@ def on_message(client, userdata, msg):
         payload = msg.payload.decode("utf-8")
         data = json.loads(payload)
 
+        # 檢查是否為校正訊息
+        msg_type = data.get("type", "data")
+
+        if msg_type == "connection_test":
+            # ESP32 連線測試訊息
+            print("\n" + "=" * 60)
+            print("🔗 ESP32 已連線！")
+            print(f"   裝置: {data.get('device', 'Unknown')}")
+            print(f"   狀態: {data.get('status', 'Unknown')}")
+            print("=" * 60)
+            print("\n等待校正開始...")
+            return
+
+        if msg_type == "calibration":
+            # 校正進度訊息
+            step = data.get("step", "")
+            action = data.get("action", "")
+            progress = data.get("progress", 0)
+            samples = data.get("samples", 0)
+            accel = data.get("accel", {})
+
+            # 清除當前行並顯示校正狀態
+            print("\r" + " " * 80, end="\r")  # 清除行
+
+            action_text = {
+                "waiting": "⏳ 準備中",
+                "stand": "📍 站立",
+                "lift": "🦵 抬腳",
+                "analyzing": "📊 分析中",
+            }.get(action, action)
+
+            # 顯示進度條
+            if progress > 0:
+                bar_length = 20
+                filled = int(bar_length * progress / 100)
+                bar = "█" * filled + "░" * (bar_length - filled)
+                print(
+                    f"校正 [{step}] {action_text} [{bar}] {progress}% | 樣本:{samples}"
+                )
+            else:
+                print(
+                    f"校正 [{step}] {action_text} | 加速度: X={accel.get('x', 0):.2f} Y={accel.get('y', 0):.2f} Z={accel.get('z', 0):.2f}"
+                )
+            return
+
+        elif msg_type == "calibration_complete":
+            # 校正完成訊息
+            print("\n" + "=" * 60)
+            print("✓ 校正完成！")
+            print(f"  主軸: {['X', 'Y', 'Z'][data.get('primary_axis', 0)]}")
+            print(f"  重力軸: {['X', 'Y', 'Z'][data.get('gravity_axis', 0)]}")
+            print(
+                f"  軸向符號: {'+1 (抬腳增加)' if data.get('axis_sign', 1) > 0 else '-1 (抬腳減少)'}"
+            )
+            print(f"  站立平均值: {data.get('stand_avg', 0):.3f}")
+            print(f"  抬腳平均值: {data.get('lift_avg', 0):.3f}")
+            print("=" * 60)
+            print("\n開始接收測量資料...")
+            return
+
         # 記錄開始時間
         if start_time is None:
             start_time = time.time()
