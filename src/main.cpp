@@ -107,7 +107,7 @@ bool pushSample(const SensorSample *sample)
     }
   }
   // Mutex 超時 - 不算資料丟失，下次再試
-  return true;  // 返回 true 避免誤報警告
+  return true; // 返回 true 避免誤報警告
 }
 
 uint16_t popSamples(SensorSample *dest, uint16_t maxCount)
@@ -728,7 +728,7 @@ void samplingTask(void *parameter)
       static unsigned long lastWarning = 0;
       if (currentTime - lastWarning > 5000)
       {
-        Serial.printf("⚠️ Ring buffer 已滿 (%d/%d)，丟棄: %lu 筆\n", 
+        Serial.printf("⚠️ Ring buffer 已滿 (%d/%d)，丟棄: %lu 筆\n",
                       bufferCount, RING_BUFFER_SIZE, droppedCount);
         lastWarning = currentTime;
       }
