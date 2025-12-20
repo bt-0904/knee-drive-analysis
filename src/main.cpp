@@ -5,6 +5,50 @@
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 
+// ===== FreeRTOS 標頭 =====
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
+
+// ===== FreeRTOS 任務配置 =====
+#define SAMPLE_INTERVAL_MS 20 // 取樣間隔 20ms = 50Hz
+#define SEND_INTERVAL_MS 500  // 發送間隔 500ms = 2Hz
+#define BATCH_SIZE 25         // 每批次最多 25 筆
+#define RING_BUFFER_SIZE 200  // 環形緩衝區大小（可承受 4 秒網路中斷）
+
+#define SAMPLING_STACK_SIZE 4096 // 取樣任務 Stack
+#define TRANSMIT_STACK_SIZE 8192 // 傳輸任務 Stack（JSON 序列化需要較多空間）
+#define SAMPLING_PRIORITY 3      // 取樣任務優先級（高）
+#define TRANSMIT_PRIORITY 1      // 傳輸任務優先級（低）
+
+// ===== 感測器樣本結構（縮短欄位以節省記憶體）=====
+struct SensorSample
+{
+  uint32_t timestamp;           // millis() 時間戳記
+  float angle;                  // 校正後角度
+  float deltaY;                 // 前後位移
+  float deltaZ;                 // 上下位移
+  float accelX, accelY, accelZ; // 加速度
+  float gyroX, gyroY, gyroZ;    // 陀螺儀
+  bool stable;                  // 穩定度
+};
+
+// ===== 環形緩衝區 =====
+SensorSample ringBuffer[RING_BUFFER_SIZE];
+volatile uint16_t bufferHead = 0;  // 寫入位置
+volatile uint16_t bufferTail = 0;  // 讀取位置
+volatile uint16_t bufferCount = 0; // 目前資料筆數
+
+// ===== FreeRTOS 同步物件 =====
+SemaphoreHandle_t bufferMutex = NULL;
+TaskHandle_t samplingTaskHandle = NULL;
+TaskHandle_t transmitTaskHandle = NULL;
+
+// ===== 統計變數 =====
+volatile uint32_t totalSampleCount = 0;
+volatile uint32_t totalSentCount = 0;
+volatile uint32_t droppedCount = 0;
+
 // Wi-Fi 設定
 const char *WIFI_SSID = "Bt";
 const char *WIFI_PASSWORD = "bt_980904";
@@ -39,6 +83,64 @@ unsigned long lastTime = 0;
 float kneeX = 0.0; // 左右位置
 float kneeY = 0.0; // 前後位置
 float kneeZ = 0.0; // 上下位置（負值表示在髖關節下方）
+
+// ===== 環形緩衝區操作函數 =====
+bool pushSample(const SensorSample *sample)
+{
+  if (xSemaphoreTake(bufferMutex, pdMS_TO_TICKS(10)) == pdTRUE)
+  {
+    if (bufferCount < RING_BUFFER_SIZE)
+    {
+      ringBuffer[bufferHead] = *sample;
+      bufferHead = (bufferHead + 1) % RING_BUFFER_SIZE;
+      bufferCount++;
+      totalSampleCount++;
+      xSemaphoreGive(bufferMutex);
+      return true;
+    }
+    else
+    {
+      // 緩衝區真的滿了，丟棄舊資料
+      droppedCount++;
+      xSemaphoreGive(bufferMutex);
+      return false;
+    }
+  }
+  // Mutex 超時 - 不算資料丟失，下次再試
+  return true;  // 返回 true 避免誤報警告
+}
+
+uint16_t popSamples(SensorSample *dest, uint16_t maxCount)
+{
+  uint16_t popped = 0;
+  if (xSemaphoreTake(bufferMutex, pdMS_TO_TICKS(50)) == pdTRUE)
+  {
+    while (bufferCount > 0 && popped < maxCount)
+    {
+      dest[popped] = ringBuffer[bufferTail];
+      bufferTail = (bufferTail + 1) % RING_BUFFER_SIZE;
+      bufferCount--;
+      popped++;
+    }
+    xSemaphoreGive(bufferMutex);
+  }
+  return popped;
+}
+
+uint16_t getBufferCount()
+{
+  uint16_t count = 0;
+  if (xSemaphoreTake(bufferMutex, pdMS_TO_TICKS(5)) == pdTRUE)
+  {
+    count = bufferCount;
+    xSemaphoreGive(bufferMutex);
+  }
+  return count;
+}
+
+// ===== FreeRTOS 任務函數宣告 =====
+void samplingTask(void *parameter);
+void transmitTask(void *parameter);
 
 // ===== 新版動態校正系統 =====
 // 校正狀態機
@@ -379,6 +481,344 @@ void scanI2C()
   Serial.println();
 }
 
+// ===== FreeRTOS 取樣任務：50Hz 高精度感測器讀取 =====
+void samplingTask(void *parameter)
+{
+  TickType_t xLastWakeTime = xTaskGetTickCount();
+  const TickType_t xFrequency = pdMS_TO_TICKS(SAMPLE_INTERVAL_MS);
+
+  Serial.println("[SamplingTask] 任務啟動，開始 50Hz 取樣");
+
+  while (true)
+  {
+    // 精確 20ms 間隔（使用 vTaskDelayUntil 確保穩定頻率）
+    vTaskDelayUntil(&xLastWakeTime, xFrequency);
+
+    // 檢查 IMU 是否有新數據
+    if (!imu.dataReady())
+    {
+      continue;
+    }
+
+    // 計算時間差
+    unsigned long currentTime = millis();
+    float deltaTime = (currentTime - lastTime) / 1000.0;
+    lastTime = currentTime;
+
+    // 讀取感測器數據
+    imu.getAGMT();
+
+    float accelX = imu.accX();
+    float accelY = imu.accY();
+    float accelZ = imu.accZ();
+    float gyroX = imu.gyrX();
+    float gyroY = imu.gyrY();
+    float gyroZ = imu.gyrZ();
+
+    // ===== 校正階段處理 =====
+    if (!isCalibrated)
+    {
+      unsigned long stateElapsed = currentTime - stateStartTime;
+
+      switch (calState)
+      {
+      case CAL_INIT:
+        if (currentTime >= stateStartTime)
+        {
+          calState = CAL_STAND_1;
+          stateStartTime = currentTime;
+          Serial.println("\n╔══════════════════════════════════════════════════════════╗");
+          Serial.println("║  📍 步驟 1/4：站立                                       ║");
+          Serial.println("╚══════════════════════════════════════════════════════════╝");
+        }
+        break;
+
+      case CAL_STAND_1:
+        if (stateElapsed < STATE_DURATION)
+        {
+          addCalibrationSample(standData1, accelX, accelY, accelZ);
+        }
+        else
+        {
+          calState = CAL_LIFT_1;
+          stateStartTime = currentTime;
+          Serial.println("\n╔══════════════════════════════════════════════════════════╗");
+          Serial.println("║  🦵 步驟 2/4：抬腳                                       ║");
+          Serial.println("╚══════════════════════════════════════════════════════════╝");
+        }
+        break;
+
+      case CAL_LIFT_1:
+        if (stateElapsed < STATE_DURATION)
+        {
+          addCalibrationSample(liftData1, accelX, accelY, accelZ);
+        }
+        else
+        {
+          calState = CAL_STAND_2;
+          stateStartTime = currentTime;
+          Serial.println("\n╔══════════════════════════════════════════════════════════╗");
+          Serial.println("║  📍 步驟 3/4：再次站立                                   ║");
+          Serial.println("╚══════════════════════════════════════════════════════════╝");
+        }
+        break;
+
+      case CAL_STAND_2:
+        if (stateElapsed < STATE_DURATION)
+        {
+          addCalibrationSample(standData2, accelX, accelY, accelZ);
+        }
+        else
+        {
+          calState = CAL_LIFT_2;
+          stateStartTime = currentTime;
+          Serial.println("\n╔══════════════════════════════════════════════════════════╗");
+          Serial.println("║  🦵 步驟 4/4：最後一次抬腳                               ║");
+          Serial.println("╚══════════════════════════════════════════════════════════╝");
+        }
+        break;
+
+      case CAL_LIFT_2:
+        if (stateElapsed < STATE_DURATION)
+        {
+          addCalibrationSample(liftData2, accelX, accelY, accelZ);
+        }
+        else
+        {
+          calState = CAL_ANALYZING;
+          Serial.println("\n╔══════════════════════════════════════════════════════════╗");
+          Serial.println("║  🎉 數據收集完成！正在分析...                            ║");
+          Serial.println("╚══════════════════════════════════════════════════════════╝");
+        }
+        break;
+
+      case CAL_ANALYZING:
+        analyzeSensorOrientation();
+        calState = CAL_COMPLETE;
+        isCalibrated = true;
+        startTime = currentTime;
+        initialKneeY = 0;
+        initialKneeZ = -THIGH_LENGTH;
+        sendCalibrationResult();
+        Serial.println("\n✓ 校正完成！開始正常測量...\n");
+        break;
+
+      case CAL_COMPLETE:
+        break;
+      }
+      continue; // 校正期間不存儲數據到 ring buffer
+    }
+
+    // ===== 正常測量模式：計算角度 =====
+    float accelAngle = 0.0;
+    float gyroRate = 0.0;
+    float primaryAccel = 0.0;
+    float gravityAccel = 0.0;
+
+    // 根據校正結果選擇軸向
+    if (sensorOrient.primaryAxis == 0)
+    {
+      primaryAccel = accelX;
+      gyroRate = (sensorOrient.secondaryAxis == 2) ? gyroY : gyroZ;
+    }
+    else if (sensorOrient.primaryAxis == 1)
+    {
+      primaryAccel = accelY;
+      gyroRate = (sensorOrient.secondaryAxis == 2) ? gyroX : gyroZ;
+    }
+    else
+    {
+      primaryAccel = accelZ;
+      gyroRate = (sensorOrient.secondaryAxis == 1) ? gyroX : gyroY;
+    }
+
+    if (sensorOrient.secondaryAxis == 0)
+      gravityAccel = accelX;
+    else if (sensorOrient.secondaryAxis == 1)
+      gravityAccel = accelY;
+    else
+      gravityAccel = accelZ;
+
+    // 計算加速度角度
+    accelAngle = atan2(primaryAccel, gravityAccel) * 180.0 / PI;
+
+    // 陀螺儀積分
+    float gyroAngle = thighAngle + gyroRate * deltaTime;
+
+    // 互補濾波
+    float alpha = 0.90;
+    thighAngle = alpha * gyroAngle + (1 - alpha) * accelAngle;
+
+    // 角度標準化
+    if (thighAngle > 180.0)
+      thighAngle -= 360.0;
+    if (thighAngle < -180.0)
+      thighAngle += 360.0;
+
+    // 應用校正
+    float standAngle = atan2(sensorOrient.standAvg, sensorOrient.gravityAxis) * 180.0 / PI;
+    float rawCalibratedAngle = thighAngle - standAngle;
+
+    while (rawCalibratedAngle > 180.0)
+      rawCalibratedAngle -= 360.0;
+    while (rawCalibratedAngle < -180.0)
+      rawCalibratedAngle += 360.0;
+
+    float calibratedAngle = rawCalibratedAngle * sensorOrient.axisSign;
+    float displayAngle = abs(calibratedAngle);
+    if (displayAngle > 120.0)
+      displayAngle = 180.0 - displayAngle;
+
+    // 低通濾波
+    float angleDelta = abs(displayAngle - smoothedAngle);
+    if (angleDelta > 30.0 && smoothedAngle != 0.0)
+    {
+      smoothedAngle = smoothedAngle * 0.95 + displayAngle * 0.05;
+    }
+    else
+    {
+      smoothedAngle = smoothedAngle * (1.0 - SMOOTHING_FACTOR) + displayAngle * SMOOTHING_FACTOR;
+    }
+
+    calibratedAngle = smoothedAngle;
+
+    // 計算膝蓋座標
+    float angleRad = calibratedAngle * PI / 180.0;
+    kneeX = 0.0;
+    kneeY = THIGH_LENGTH * sin(angleRad);
+    kneeZ = -THIGH_LENGTH * cos(angleRad);
+
+    float deltaY = kneeY - initialKneeY;
+    float deltaZ = kneeZ - initialKneeZ;
+
+    // 穩定度檢測
+    float angleDiff = abs(calibratedAngle - prevAngle);
+    if (angleDiff < 0.5)
+    {
+      stableCount++;
+    }
+    else
+    {
+      stableCount = 0;
+      isStable = false;
+    }
+    if (stableCount >= 30 && !isStable)
+    {
+      isStable = true;
+    }
+    prevAngle = calibratedAngle;
+
+    // ===== 儲存到 Ring Buffer =====
+    SensorSample sample;
+    sample.timestamp = currentTime;
+    sample.angle = abs(calibratedAngle);
+    sample.deltaY = deltaY;
+    sample.deltaZ = deltaZ;
+    sample.accelX = accelX;
+    sample.accelY = accelY;
+    sample.accelZ = accelZ;
+    sample.gyroX = gyroX;
+    sample.gyroY = gyroY;
+    sample.gyroZ = gyroZ;
+    sample.stable = isStable;
+
+    if (!pushSample(&sample))
+    {
+      // Buffer 真的滿了，記錄警告（但不阻塞）
+      static unsigned long lastWarning = 0;
+      if (currentTime - lastWarning > 5000)
+      {
+        Serial.printf("⚠️ Ring buffer 已滿 (%d/%d)，丟棄: %lu 筆\n", 
+                      bufferCount, RING_BUFFER_SIZE, droppedCount);
+        lastWarning = currentTime;
+      }
+    }
+  }
+}
+
+// ===== FreeRTOS 傳輸任務：2Hz 批次 MQTT 發送 =====
+void transmitTask(void *parameter)
+{
+  TickType_t xLastWakeTime = xTaskGetTickCount();
+  const TickType_t xFrequency = pdMS_TO_TICKS(SEND_INTERVAL_MS);
+
+  Serial.println("[TransmitTask] 任務啟動，開始 2Hz 批次傳輸");
+
+  SensorSample batchBuffer[BATCH_SIZE];
+
+  while (true)
+  {
+    vTaskDelayUntil(&xLastWakeTime, xFrequency);
+
+    // 維護 WiFi 連線
+    if (WiFi.status() != WL_CONNECTED)
+    {
+      Serial.println("⚠️ Wi-Fi 斷線，嘗試重連...");
+      connectWiFi();
+      continue;
+    }
+
+    // 維護 MQTT 連線
+    if (!mqttClient.connected())
+    {
+      reconnectMQTT();
+      if (!mqttClient.connected())
+      {
+        continue;
+      }
+    }
+
+    mqttClient.loop();
+
+    // 從 Ring Buffer 取出數據
+    uint16_t count = popSamples(batchBuffer, BATCH_SIZE);
+
+    if (count == 0)
+    {
+      continue; // 沒有數據可發送
+    }
+
+    // 建立批次 JSON（使用縮短的欄位名稱）
+    JsonDocument doc;
+    doc["type"] = "batch";
+    doc["n"] = count;
+
+    JsonArray dataArray = doc["d"].to<JsonArray>();
+
+    for (uint16_t i = 0; i < count; i++)
+    {
+      JsonObject item = dataArray.add<JsonObject>();
+      item["t"] = batchBuffer[i].timestamp / 1000.0;             // 時間戳（秒）
+      item["a"] = round(batchBuffer[i].angle * 10) / 10.0;       // 角度（保留1位小數）
+      item["s"] = batchBuffer[i].stable ? 1 : 0;                 // 穩定（0/1）
+      item["dy"] = round(batchBuffer[i].deltaY * 10) / 10.0;     // deltaY
+      item["dz"] = round(batchBuffer[i].deltaZ * 10) / 10.0;     // deltaZ
+      item["ax"] = round(batchBuffer[i].accelX * 1000) / 1000.0; // 加速度X
+      item["ay"] = round(batchBuffer[i].accelY * 1000) / 1000.0;
+      item["az"] = round(batchBuffer[i].accelZ * 1000) / 1000.0;
+      item["gx"] = round(batchBuffer[i].gyroX * 10) / 10.0; // 陀螺儀X
+      item["gy"] = round(batchBuffer[i].gyroY * 10) / 10.0;
+      item["gz"] = round(batchBuffer[i].gyroZ * 10) / 10.0;
+    }
+
+    // 序列化並發送
+    char jsonBuffer[4096];
+    size_t jsonSize = serializeJson(doc, jsonBuffer);
+
+    bool success = mqttClient.publish(MQTT_TOPIC, jsonBuffer, false);
+
+    if (success)
+    {
+      Serial.printf("✓ 批次發送 %d 筆 (%d bytes)，緩衝區剩餘: %d\n",
+                    count, jsonSize, getBufferCount());
+    }
+    else
+    {
+      Serial.printf("✗ MQTT 發送失敗 (狀態: %d)\n", mqttClient.state());
+    }
+  }
+}
+
 void setup()
 {
   // 初始化序列埠 (115200 baud)
@@ -461,7 +901,7 @@ void setup()
 
   // 設定 MQTT 伺服器
   mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
-  mqttClient.setBufferSize(512);
+  mqttClient.setBufferSize(4096); // 擴大為 4KB 以容納批次 JSON
   mqttClient.setKeepAlive(60);
   mqttClient.setSocketTimeout(30);
 
@@ -554,560 +994,74 @@ void setup()
   stateStartTime = millis() + 3000; // 3 秒後開始第一階段
   calState = CAL_INIT;
   delay(100);
+
+  // ===== 初始化 FreeRTOS 同步物件 =====
+  bufferMutex = xSemaphoreCreateMutex();
+  if (bufferMutex == NULL)
+  {
+    Serial.println("✗ Mutex 建立失敗！");
+    while (1)
+      delay(1000);
+  }
+  Serial.println("✓ FreeRTOS Mutex 初始化完成");
+
+  // ===== 建立 FreeRTOS 任務 =====
+  Serial.println("\n╔════════════════════════════════════════════════════╗");
+  Serial.println("║  🚀 FreeRTOS 雙任務架構啟動                        ║");
+  Serial.println("║                                                    ║");
+  Serial.printf("║  取樣頻率: %d Hz (每 %d ms)                        ║\n", 1000 / SAMPLE_INTERVAL_MS, SAMPLE_INTERVAL_MS);
+  Serial.printf("║  發送頻率: %d Hz (每 %d ms)                        ║\n", 1000 / SEND_INTERVAL_MS, SEND_INTERVAL_MS);
+  Serial.printf("║  批次大小: %d 筆                                   ║\n", BATCH_SIZE);
+  Serial.printf("║  緩衝區: %d 筆 (%.1f 秒)                           ║\n", RING_BUFFER_SIZE, (float)RING_BUFFER_SIZE * SAMPLE_INTERVAL_MS / 1000);
+  Serial.println("╚════════════════════════════════════════════════════╝\n");
+
+  // 建立取樣任務（高優先級）
+  BaseType_t result = xTaskCreatePinnedToCore(
+      samplingTask,        // 任務函數
+      "SamplingTask",      // 任務名稱
+      SAMPLING_STACK_SIZE, // Stack 大小
+      NULL,                // 參數
+      SAMPLING_PRIORITY,   // 優先級
+      &samplingTaskHandle, // Handle
+      0                    // Core 0 (ESP32-C3 只有 Core 0)
+  );
+
+  if (result == pdPASS)
+  {
+    Serial.println("✓ 取樣任務建立成功 (50Hz, 優先級 3)");
+  }
+  else
+  {
+    Serial.println("✗ 取樣任務建立失敗！");
+  }
+
+  // 建立傳輸任務（低優先級）
+  result = xTaskCreatePinnedToCore(
+      transmitTask,        // 任務函數
+      "TransmitTask",      // 任務名稱
+      TRANSMIT_STACK_SIZE, // Stack 大小
+      NULL,                // 參數
+      TRANSMIT_PRIORITY,   // 優先級
+      &transmitTaskHandle, // Handle
+      0                    // Core 0
+  );
+
+  if (result == pdPASS)
+  {
+    Serial.println("✓ 傳輸任務建立成功 (2Hz, 優先級 1)");
+  }
+  else
+  {
+    Serial.println("✗ 傳輸任務建立失敗！");
+  }
+
+  Serial.println("\n開始運行...\n");
 }
 
 void loop()
 {
-  // 檢查是否有新數據
-  if (imu.dataReady())
-  {
-    // 計算時間差
-    unsigned long currentTime = millis();
-    float deltaTime = (currentTime - lastTime) / 1000.0; // 轉換為秒
-    lastTime = currentTime;
-
-    // 讀取感測器數據
-    imu.getAGMT();
-
-    // 加速度數據 (單位: g)
-    float accelX = imu.accX();
-    float accelY = imu.accY();
-    float accelZ = imu.accZ();
-
-    // 陀螺儀數據 (單位: °/s)
-    float gyroX = imu.gyrX();
-    float gyroY = imu.gyrY();
-    float gyroZ = imu.gyrZ();
-
-    // ===== 動態校正狀態機 =====
-    if (!isCalibrated)
-    {
-      unsigned long stateElapsed = currentTime - stateStartTime;
-
-      switch (calState)
-      {
-      case CAL_INIT:
-        // 等待初始 3 秒
-        if (currentTime >= stateStartTime)
-        {
-          calState = CAL_STAND_1;
-          stateStartTime = currentTime;
-          Serial.println();
-          Serial.println("╔══════════════════════════════════════════════════════════╗");
-          Serial.println("║  ┌─────────────────────────────────────────────────────┐ ║");
-          Serial.println("║  │  📍 步驟 1/4：站立                                  │ ║");
-          Serial.println("║  └─────────────────────────────────────────────────────┘ ║");
-          Serial.println("║                                                          ║");
-          Serial.println("║  👤 動作：雙腳自然站立，大腿保持垂直向下                ║");
-          Serial.println("║                                                          ║");
-          Serial.println("║  ⚠️  注意：請保持身體穩定，不要晃動                      ║");
-          Serial.println("║                                                          ║");
-          Serial.println("╚══════════════════════════════════════════════════════════╝");
-          // 發送 MQTT 狀態
-          sendCalibrationStatus("1/4", "stand", 0, 0, accelX, accelY, accelZ);
-        }
-        else
-        {
-          int remaining = (stateStartTime - currentTime) / 1000 + 1;
-          static int lastRemaining = 0;
-          if (remaining != lastRemaining)
-          {
-            Serial.println();
-            Serial.println("┌────────────────────────────────────┐");
-            Serial.printf("│  ⏳ 校正即將開始... %d 秒           │\n", remaining);
-            Serial.println("│                                    │");
-            Serial.println("│  🧍 請先保持站立姿勢準備好         │");
-            Serial.println("└────────────────────────────────────┘");
-            // 發送準備狀態
-            sendCalibrationStatus("準備中", "waiting", remaining, 0, accelX, accelY, accelZ);
-            lastRemaining = remaining;
-          }
-        }
-        break;
-
-      case CAL_STAND_1:
-        if (stateElapsed < STATE_DURATION)
-        {
-          addCalibrationSample(standData1, accelX, accelY, accelZ);
-          int remainingSec = (STATE_DURATION - stateElapsed) / 1000 + 1;
-          static int lastStand1Sec = 0;
-          if (remainingSec != lastStand1Sec)
-          {
-            // 進度條
-            int progress = (stateElapsed * 100) / STATE_DURATION;
-            Serial.print("📍 站立中 [");
-            for (int i = 0; i < 20; i++)
-            {
-              Serial.print(i < (progress / 5) ? "█" : "░");
-            }
-            Serial.printf("] %d秒  (樣本:%d)\n", remainingSec, standData1.count);
-            // 發送 MQTT 狀態
-            sendCalibrationStatus("1/4", "stand", progress, standData1.count, accelX, accelY, accelZ);
-            lastStand1Sec = remainingSec;
-          }
-        }
-        else
-        {
-          calState = CAL_LIFT_1;
-          stateStartTime = currentTime;
-          Serial.println();
-          Serial.println("╔══════════════════════════════════════════════════════════╗");
-          Serial.println("║  ┌─────────────────────────────────────────────────────┐ ║");
-          Serial.println("║  │  🦵 步驟 2/4：抬腳                                  │ ║");
-          Serial.println("║  └─────────────────────────────────────────────────────┘ ║");
-          Serial.println("║                                                          ║");
-          Serial.println("║  👤 動作：抬起一隻腳，膝蓋盡量抬高（約 45-90 度）       ║");
-          Serial.println("║                                                          ║");
-          Serial.println("║  💡 提示：可以扶著牆壁保持平衡                          ║");
-          Serial.println("║                                                          ║");
-          Serial.println("╚══════════════════════════════════════════════════════════╝");
-          // 發送步驟切換通知
-          sendCalibrationStatus("2/4", "lift", 0, 0, accelX, accelY, accelZ);
-        }
-        break;
-
-      case CAL_LIFT_1:
-        if (stateElapsed < STATE_DURATION)
-        {
-          addCalibrationSample(liftData1, accelX, accelY, accelZ);
-          int remainingSec = (STATE_DURATION - stateElapsed) / 1000 + 1;
-          static int lastLift1Sec = 0;
-          if (remainingSec != lastLift1Sec)
-          {
-            int progress = (stateElapsed * 100) / STATE_DURATION;
-            Serial.print("🦵 抬腳中 [");
-            for (int i = 0; i < 20; i++)
-            {
-              Serial.print(i < (progress / 5) ? "█" : "░");
-            }
-            Serial.printf("] %d秒  (樣本:%d)\n", remainingSec, liftData1.count);
-            // 發送 MQTT 狀態
-            sendCalibrationStatus("2/4", "lift", progress, liftData1.count, accelX, accelY, accelZ);
-            lastLift1Sec = remainingSec;
-          }
-        }
-        else
-        {
-          calState = CAL_STAND_2;
-          stateStartTime = currentTime;
-          Serial.println();
-          Serial.println("╔══════════════════════════════════════════════════════════╗");
-          Serial.println("║  ┌─────────────────────────────────────────────────────┐ ║");
-          Serial.println("║  │  📍 步驟 3/4：再次站立                              │ ║");
-          Serial.println("║  └─────────────────────────────────────────────────────┘ ║");
-          Serial.println("║                                                          ║");
-          Serial.println("║  👤 動作：放下腳，回到自然站立姿勢                      ║");
-          Serial.println("║                                                          ║");
-          Serial.println("║  ⚠️  注意：這是第二次站立數據收集，請保持穩定           ║");
-          Serial.println("║                                                          ║");
-          Serial.println("╚══════════════════════════════════════════════════════════╝");
-          // 發送步驟切換通知
-          sendCalibrationStatus("3/4", "stand", 0, 0, accelX, accelY, accelZ);
-        }
-        break;
-
-      case CAL_STAND_2:
-        if (stateElapsed < STATE_DURATION)
-        {
-          addCalibrationSample(standData2, accelX, accelY, accelZ);
-          int remainingSec = (STATE_DURATION - stateElapsed) / 1000 + 1;
-          static int lastStand2Sec = 0;
-          if (remainingSec != lastStand2Sec)
-          {
-            int progress = (stateElapsed * 100) / STATE_DURATION;
-            Serial.print("📍 站立中 [");
-            for (int i = 0; i < 20; i++)
-            {
-              Serial.print(i < (progress / 5) ? "█" : "░");
-            }
-            Serial.printf("] %d秒  (樣本:%d)\n", remainingSec, standData2.count);
-            // 發送 MQTT 狀態
-            sendCalibrationStatus("3/4", "stand", progress, standData2.count, accelX, accelY, accelZ);
-            lastStand2Sec = remainingSec;
-          }
-        }
-        else
-        {
-          calState = CAL_LIFT_2;
-          stateStartTime = currentTime;
-          Serial.println();
-          Serial.println("╔══════════════════════════════════════════════════════════╗");
-          Serial.println("║  ┌─────────────────────────────────────────────────────┐ ║");
-          Serial.println("║  │  🦵 步驟 4/4：最後一次抬腳                          │ ║");
-          Serial.println("║  └─────────────────────────────────────────────────────┘ ║");
-          Serial.println("║                                                          ║");
-          Serial.println("║  👤 動作：再次抬起膝蓋，與第一次抬腳高度相近            ║");
-          Serial.println("║                                                          ║");
-          Serial.println("║  🎉 這是最後一步！完成後將自動分析數據                  ║");
-          Serial.println("║                                                          ║");
-          Serial.println("╚══════════════════════════════════════════════════════════╝");
-          // 發送步驟切換通知
-          sendCalibrationStatus("4/4", "lift", 0, 0, accelX, accelY, accelZ);
-        }
-        break;
-
-      case CAL_LIFT_2:
-        if (stateElapsed < STATE_DURATION)
-        {
-          addCalibrationSample(liftData2, accelX, accelY, accelZ);
-          int remainingSec = (STATE_DURATION - stateElapsed) / 1000 + 1;
-          static int lastLift2Sec = 0;
-          if (remainingSec != lastLift2Sec)
-          {
-            int progress = (stateElapsed * 100) / STATE_DURATION;
-            Serial.print("🦵 抬腳中 [");
-            for (int i = 0; i < 20; i++)
-            {
-              Serial.print(i < (progress / 5) ? "█" : "░");
-            }
-            Serial.printf("] %d秒  (樣本:%d)\n", remainingSec, liftData2.count);
-            // 發送 MQTT 狀態
-            sendCalibrationStatus("4/4", "lift", progress, liftData2.count, accelX, accelY, accelZ);
-            lastLift2Sec = remainingSec;
-          }
-        }
-        else
-        {
-          calState = CAL_ANALYZING;
-          Serial.println();
-          Serial.println("╔══════════════════════════════════════════════════════════╗");
-          Serial.println("║  🎉 數據收集完成！                                       ║");
-          Serial.println("║                                                          ║");
-          Serial.println("║  📊 正在分析感測器安裝方向...                            ║");
-          Serial.println("║                                                          ║");
-          Serial.printf("║  📈 收集統計：站立 %d+%d 筆，抬腳 %d+%d 筆             ║\n",
-                        standData1.count, standData2.count, liftData1.count, liftData2.count);
-          Serial.println("╚══════════════════════════════════════════════════════════╝");
-          Serial.println();
-          // 發送分析中狀態
-          sendCalibrationStatus("分析中", "analyzing", 100,
-                                standData1.count + standData2.count + liftData1.count + liftData2.count,
-                                accelX, accelY, accelZ);
-        }
-        break;
-
-      case CAL_ANALYZING:
-        // 分析感測器方向
-        analyzeSensorOrientation();
-
-        // 設定校正完成
-        calState = CAL_COMPLETE;
-        isCalibrated = true;
-        startTime = currentTime;
-
-        // 設定初始座標
-        initialKneeY = 0;
-        initialKneeZ = -THIGH_LENGTH;
-
-        // 發送校正結果到 MQTT
-        sendCalibrationResult();
-
-        Serial.println("╔════════════════════════════════════════════════════╗");
-        Serial.println("║  ✓ 校正完成！系統已偵測感測器安裝方向              ║");
-        Serial.println("║                                                    ║");
-        Serial.println("║  📍 座標顯示說明：                                  ║");
-        Serial.println("║     • 站立時角度應接近 0°                          ║");
-        Serial.println("║     • 抬腿時角度會增加                             ║");
-        Serial.println("╚════════════════════════════════════════════════════╝\n");
-        Serial.println("開始正常測量...\n");
-        break;
-
-      case CAL_COMPLETE:
-        // 不應該執行到這裡
-        break;
-      }
-
-      delay(50); // 校正期間降低取樣頻率
-      return;
-    }
-
-    // ===== 使用自適應角度計算（根據校正結果）=====
-    float accelAngle = 0.0;
-    float gyroRate = 0.0;
-
-    // 根據偵測到的主軸和重力軸計算角度
-    // 使用主軸（抬腳時變化最大的軸）和重力軸來計算傾斜角度
-    float primaryAccel = 0.0;
-    float gravityAccel = 0.0;
-
-    // 獲取主軸加速度值
-    if (sensorOrient.primaryAxis == 0)
-    {
-      primaryAccel = accelX;
-      // 根據主軸選擇適當的陀螺儀軸
-      if (sensorOrient.secondaryAxis == 2)
-        gyroRate = gyroY;
-      else if (sensorOrient.secondaryAxis == 1)
-        gyroRate = gyroZ;
-      else
-        gyroRate = gyroY;
-    }
-    else if (sensorOrient.primaryAxis == 1)
-    {
-      primaryAccel = accelY;
-      if (sensorOrient.secondaryAxis == 2)
-        gyroRate = gyroX;
-      else if (sensorOrient.secondaryAxis == 0)
-        gyroRate = gyroZ;
-      else
-        gyroRate = gyroX;
-    }
-    else
-    {
-      primaryAccel = accelZ;
-      if (sensorOrient.secondaryAxis == 1)
-        gyroRate = gyroX;
-      else if (sensorOrient.secondaryAxis == 0)
-        gyroRate = gyroY;
-      else
-        gyroRate = gyroX;
-    }
-
-    // 獲取重力軸加速度值
-    if (sensorOrient.secondaryAxis == 0)
-      gravityAccel = accelX;
-    else if (sensorOrient.secondaryAxis == 1)
-      gravityAccel = accelY;
-    else
-      gravityAccel = accelZ;
-
-    // 計算加速度角度
-    accelAngle = atan2(primaryAccel, gravityAccel) * 180.0 / PI;
-
-    // 陀螺儀積分
-    float gyroAngle = thighAngle + gyroRate * deltaTime;
-
-    // 互補濾波（融合兩者）
-    // 降低 alpha 值，讓加速度計有更多權重來減少漂移
-    float alpha = 0.90; // 90% 信任陀螺儀，10% 信任加速度計
-    thighAngle = alpha * gyroAngle + (1 - alpha) * accelAngle;
-
-    // 確保角度在 -180° 到 180° 範圍內
-    if (thighAngle > 180.0)
-      thighAngle -= 360.0;
-    if (thighAngle < -180.0)
-      thighAngle += 360.0;
-
-    // ===== 應用校正（使站立時為 0 度，抬腳時為正角度）=====
-    // 計算站立時的基準角度
-    float standAngle = atan2(sensorOrient.standAvg, sensorOrient.gravityAxis) * 180.0 / PI;
-
-    // 計算校正後的角度：當前角度 - 站立基準角度
-    float rawCalibratedAngle = thighAngle - standAngle;
-
-    // 將角度標準化到 -180 到 180 範圍
-    while (rawCalibratedAngle > 180.0)
-      rawCalibratedAngle -= 360.0;
-    while (rawCalibratedAngle < -180.0)
-      rawCalibratedAngle += 360.0;
-
-    // 根據 axisSign 調整方向（確保抬腳時角度增加）
-    float calibratedAngle = rawCalibratedAngle * sensorOrient.axisSign;
-
-    // 將校正後的角度限制在合理的抬腳範圍內 (0° ~ 120°)
-    // 站立時應該接近 0°，抬腳最多約 90-100°
-    // 使用絕對值來顯示抬腳角度
-    float displayAngle = abs(calibratedAngle);
-
-    // 如果角度超過 120°，可能是計算錯誤，進行修正
-    if (displayAngle > 120.0)
-    {
-      displayAngle = 180.0 - displayAngle;
-    }
-
-    // ===== 低通濾波器（平滑角度輸出，減少突然跳動）=====
-    // 檢測異常跳動：如果角度突然變化超過 30 度，忽略這個值
-    float angleDelta = abs(displayAngle - smoothedAngle);
-    if (angleDelta > 30.0 && smoothedAngle != 0.0)
-    {
-      // 異常跳動，使用較小的更新權重
-      smoothedAngle = smoothedAngle * 0.95 + displayAngle * 0.05;
-    }
-    else
-    {
-      // 正常更新：使用低通濾波
-      smoothedAngle = smoothedAngle * (1.0 - SMOOTHING_FACTOR) + displayAngle * SMOOTHING_FACTOR;
-    }
-
-    // 使用平滑後的角度作為最終顯示值
-    calibratedAngle = smoothedAngle;
-
-    // ===== 計算膝蓋座標（相對於髖關節）=====
-    float angleRad = calibratedAngle * PI / 180.0;
-    kneeX = 0.0;
-    kneeY = THIGH_LENGTH * sin(angleRad);
-    kneeZ = -THIGH_LENGTH * cos(angleRad);
-
-    // 計算相對於初始位置的變化
-    float deltaY = kneeY - initialKneeY;
-    float deltaZ = kneeZ - initialKneeZ;
-
-    // ===== 穩定度檢測 =====
-    float angleDiff = abs(calibratedAngle - prevAngle);
-    if (angleDiff < 0.5)
-    {
-      stableCount++;
-    }
-    else
-    {
-      stableCount = 0;
-      isStable = false;
-    }
-
-    if (stableCount >= 30 && !isStable)
-    {
-      isStable = true;
-      Serial.println("\n✓ 數值已穩定！現在可以進行準確測量。\n");
-    }
-
-    prevAngle = calibratedAngle;
-
-    // 計算已運行時間
-    float elapsedTime = (currentTime - startTime) / 1000.0;
-
-    // ===== 顯示結果 =====
-    Serial.println("╔════════════════════════════════════════╗");
-    Serial.printf("║ 大腿抬起角度： %6.1f°              ║\n", abs(calibratedAngle));
-    Serial.println("╠════════════════════════════════════════╣");
-    Serial.println("║     相對位移 (相對初始位置)           ║");
-    Serial.printf("║   ΔX (左右): %7.1f                 ║\n", 0.0);
-    Serial.printf("║   ΔY (前後): %7.1f                 ║\n", deltaY);
-    Serial.printf("║   ΔZ (上下): %7.1f                 ║\n", deltaZ);
-    Serial.println("╠════════════════════════════════════════╣");
-    Serial.println("║     絕對座標 (相對髖關節)             ║");
-    Serial.printf("║   X: %7.1f  Y: %7.1f  Z: %7.1f  ║\n", kneeX, kneeY, kneeZ);
-    Serial.println("╠════════════════════════════════════════╣");
-
-    // 顯示穩定度指示器
-    Serial.print("║ 穩定度： ");
-    if (isStable)
-    {
-      Serial.println("✓ 已穩定                ║");
-    }
-    else
-    {
-      Serial.printf("⏳ 穩定中... (%d/30)        ║\n", stableCount);
-    }
-
-    // 顯示運行時間
-    Serial.printf("║ 運行時間： %.1f 秒", elapsedTime);
-    if (elapsedTime > 60)
-    {
-      Serial.println(" (建議重啟) ║");
-    }
-    else
-    {
-      Serial.println("              ║");
-    }
-    Serial.println("╠════════════════════════════════════════╣");
-
-    // 顯示對應的抬腿程度
-    float absAngle = abs(calibratedAngle);
-    Serial.print("║ 狀態： ");
-    if (absAngle < 10)
-    {
-      Serial.println("站立（大腿垂直）          ║");
-    }
-    else if (absAngle < 30)
-    {
-      Serial.println("輕微抬腿                  ║");
-    }
-    else if (absAngle < 60)
-    {
-      Serial.println("中度抬腿                  ║");
-    }
-    else if (absAngle < 85)
-    {
-      Serial.println("高抬腿                    ║");
-    }
-    else if (absAngle < 100)
-    {
-      Serial.println("膝蓋抬到最高點（接近水平）║");
-    }
-    else
-    {
-      Serial.println("過度抬腿（超過水平）      ║");
-    }
-
-    Serial.println("╠════════════════════════════════════════╣");
-    Serial.printf("║ 加速度 | X:%6.3f Y:%6.3f Z:%6.3f ║\n", accelX, accelY, accelZ);
-    Serial.printf("║ 陀螺儀 | X:%6.1f Y:%6.1f Z:%6.1f   ║\n", gyroX, gyroY, gyroZ);
-    Serial.printf("║ 主軸:%d  重力軸:%d  符號:%.0f         ║\n",
-                  sensorOrient.primaryAxis, sensorOrient.secondaryAxis, sensorOrient.axisSign);
-    Serial.println("╚════════════════════════════════════════╝");
-
-    // ===== MQTT 資料傳輸 =====
-    if (WiFi.status() != WL_CONNECTED)
-    {
-      Serial.println("⚠️ Wi-Fi 斷線，嘗試重連...");
-      connectWiFi();
-    }
-
-    if (!mqttClient.connected() && WiFi.status() == WL_CONNECTED)
-    {
-      reconnectMQTT();
-    }
-
-    if (mqttClient.connected())
-    {
-      JsonDocument doc;
-      doc["timestamp"] = currentTime / 1000.0;
-      doc["elapsed_time"] = elapsedTime;
-      doc["angle"] = abs(calibratedAngle);
-      doc["stable"] = isStable;
-
-      JsonObject delta = doc["delta"].to<JsonObject>();
-      delta["x"] = 0.0;
-      delta["y"] = deltaY;
-      delta["z"] = deltaZ;
-
-      JsonObject absolute = doc["absolute"].to<JsonObject>();
-      absolute["x"] = kneeX;
-      absolute["y"] = kneeY;
-      absolute["z"] = kneeZ;
-
-      JsonObject accel = doc["accel"].to<JsonObject>();
-      accel["x"] = accelX;
-      accel["y"] = accelY;
-      accel["z"] = accelZ;
-
-      JsonObject gyro = doc["gyro"].to<JsonObject>();
-      gyro["x"] = gyroX;
-      gyro["y"] = gyroY;
-      gyro["z"] = gyroZ;
-
-      // 加入感測器方向資訊
-      JsonObject orientation = doc["orientation"].to<JsonObject>();
-      orientation["primary_axis"] = sensorOrient.primaryAxis;
-      orientation["gravity_axis"] = sensorOrient.secondaryAxis;
-      orientation["axis_sign"] = sensorOrient.axisSign;
-
-      char jsonBuffer[512];
-      size_t jsonSize = serializeJson(doc, jsonBuffer);
-
-      Serial.printf("JSON 大小: %d bytes\n", jsonSize);
-
-      bool success = mqttClient.publish(MQTT_TOPIC, jsonBuffer, false);
-
-      if (success)
-      {
-        Serial.println("✓ 資料已發送到 MQTT");
-      }
-      else
-      {
-        Serial.println("✗ MQTT 發送失敗");
-        Serial.printf("  MQTT 狀態: %d\n", mqttClient.state());
-      }
-    }
-    else
-    {
-      Serial.println("⚠️ MQTT 未連線，資料未發送");
-    }
-
-    mqttClient.loop();
-    Serial.println();
-  }
-
-  // 100Hz 取樣頻率
-  delay(500);
+  // ===== FreeRTOS 架構：主迴圈閒置 =====
+  // 所有工作都由 samplingTask 和 transmitTask 執行
+  // loop() 只需維持 Arduino 框架運行
+  vTaskDelay(pdMS_TO_TICKS(1000));
 }

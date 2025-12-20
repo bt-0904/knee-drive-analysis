@@ -71,7 +71,7 @@ def on_message(client, userdata, msg):
         payload = msg.payload.decode("utf-8")
         data = json.loads(payload)
 
-        # 檢查是否為校正訊息
+        # 檢查訊息類型
         msg_type = data.get("type", "data")
 
         if msg_type == "connection_test":
@@ -131,6 +131,77 @@ def on_message(client, userdata, msg):
             print("\n開始接收測量資料...")
             return
 
+        elif msg_type == "batch":
+            # ===== 新版批次資料格式 =====
+            # 格式: {"type":"batch","n":25,"d":[{...},{...},...]}
+            batch_count = data.get("n", 0)
+            samples = data.get("d", [])
+
+            if start_time is None:
+                start_time = time.time()
+
+            for sample in samples:
+                timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+                # 解析縮短欄位名稱
+                # t=timestamp, a=angle, s=stable, dy=deltaY, dz=deltaZ
+                # ax/ay/az=accel, gx/gy/gz=gyro
+                elapsed = sample.get("t", 0)
+                angle = sample.get("a", 0)
+                stable = sample.get("s", 0) == 1
+                delta_y = sample.get("dy", 0)
+                delta_z = sample.get("dz", 0)
+                accel_x = sample.get("ax", 0)
+                accel_y = sample.get("ay", 0)
+                accel_z = sample.get("az", 0)
+                gyro_x = sample.get("gx", 0)
+                gyro_y = sample.get("gy", 0)
+                gyro_z = sample.get("gz", 0)
+
+                # 計算絕對座標（根據角度）
+                import math
+
+                angle_rad = angle * math.pi / 180.0
+                thigh_length = 40.0  # 大腿長度 cm
+                abs_y = thigh_length * math.sin(angle_rad)
+                abs_z = -thigh_length * math.cos(angle_rad)
+
+                row = [
+                    timestamp_str,
+                    f"{elapsed:.2f}",
+                    f"{angle:.1f}",
+                    "0.0",  # ΔX 固定為 0
+                    f"{delta_y:.1f}",
+                    f"{delta_z:.1f}",
+                    "0.0",  # 絕對X 固定為 0
+                    f"{abs_y:.1f}",
+                    f"{abs_z:.1f}",
+                    "是" if stable else "否",
+                    f"{accel_x:.3f}",
+                    f"{accel_y:.3f}",
+                    f"{accel_z:.3f}",
+                    f"{gyro_x:.1f}",
+                    f"{gyro_y:.1f}",
+                    f"{gyro_z:.1f}",
+                ]
+
+                csv_writer.writerow(row)
+                data_count += 1
+
+            # 寫入檔案
+            csv_file.flush()
+
+            # 顯示批次接收狀態
+            elapsed_total = time.time() - start_time
+            avg_rate = data_count / elapsed_total if elapsed_total > 0 else 0
+            print(
+                f"\r[批次] 收到 {batch_count} 筆 | 總計: {data_count} 筆 | "
+                f"速率: {avg_rate:.1f} Hz | 時間: {elapsed_total:.1f}s",
+                end="",
+            )
+            return
+
+        # ===== 舊版單筆資料格式（向下相容）=====
         # 記錄開始時間
         if start_time is None:
             start_time = time.time()
