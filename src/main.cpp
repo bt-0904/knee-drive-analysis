@@ -16,7 +16,7 @@
 #define BATCH_SIZE 25         // 每批次最多 25 筆
 #define RING_BUFFER_SIZE 200  // 環形緩衝區大小（可承受 4 秒網路中斷）
 
-#define SAMPLING_STACK_SIZE 4096 // 取樣任務 Stack
+#define SAMPLING_STACK_SIZE 8192 // 取樣任務 Stack（增加以避免 Stack Overflow）
 #define TRANSMIT_STACK_SIZE 8192 // 傳輸任務 Stack（JSON 序列化需要較多空間）
 #define SAMPLING_PRIORITY 3      // 取樣任務優先級（高）
 #define TRANSMIT_PRIORITY 1      // 傳輸任務優先級（低）
@@ -70,6 +70,14 @@ PubSubClient mqttClient(espClient);
 // I2C 設定
 #define SDA_PIN 5 // ESP32-C3 GPIO5
 #define SCL_PIN 6 // ESP32-C3 GPIO6
+
+// LED 指示燈設定 (用於顯示校正狀態)
+// ESP32-C3 Super Mini 內建 LED 在 GPIO8 (低電平點亮)
+#define LED_PIN 8
+#define LED_ON LOW // 內建 LED 是低電平點亮
+#define LED_OFF HIGH
+bool ledState = false;
+unsigned long lastLedToggle = 0;
 
 // 大腿參數（感測器綁在大腿上）
 #define THIGH_LENGTH 45.0 // 大腿長度 (公分)，從髖關節到膝蓋
@@ -523,17 +531,31 @@ void samplingTask(void *parameter)
       switch (calState)
       {
       case CAL_INIT:
+        // LED 慢閃 (每秒1次) - 等待開始，準備站好
+        if (currentTime - lastLedToggle >= 1000)
+        {
+          ledState = !ledState;
+          digitalWrite(LED_PIN, ledState ? LED_ON : LED_OFF);
+          lastLedToggle = currentTime;
+        }
         if (currentTime >= stateStartTime)
         {
           calState = CAL_STAND_1;
           stateStartTime = currentTime;
-          Serial.println("\n╔══════════════════════════════════════════════════════════╗");
-          Serial.println("║  📍 步驟 1/4：站立                                       ║");
-          Serial.println("╚══════════════════════════════════════════════════════════╝");
+          digitalWrite(LED_PIN, LED_OFF); // 熄滅 = 固定姿勢
+          Serial.println("[STEP 1/4] 站立 - LED 熄滅 (請保持不動)");
         }
         break;
 
       case CAL_STAND_1:
+        // LED 熄滅 - 固定姿勢站立中
+        digitalWrite(LED_PIN, LED_OFF);
+        // 除錯：每秒印出狀態
+        if (currentTime - lastLedToggle >= 1000)
+        {
+          Serial.printf("[CAL_STAND_1] elapsed=%lu, duration=%lu\n", stateElapsed, STATE_DURATION);
+          lastLedToggle = currentTime;
+        }
         if (stateElapsed < STATE_DURATION)
         {
           addCalibrationSample(standData1, accelX, accelY, accelZ);
@@ -542,13 +564,20 @@ void samplingTask(void *parameter)
         {
           calState = CAL_LIFT_1;
           stateStartTime = currentTime;
-          Serial.println("\n╔══════════════════════════════════════════════════════════╗");
-          Serial.println("║  🦵 步驟 2/4：抬腳                                       ║");
-          Serial.println("╚══════════════════════════════════════════════════════════╝");
+          lastLedToggle = currentTime;
+          ledState = true;
+          Serial.println("[STEP 2/4] 抬腳 - LED 閃爍 (請抬腿!)");
         }
         break;
 
       case CAL_LIFT_1:
+        // LED 快閃 - 提醒抬腳
+        if (currentTime - lastLedToggle >= 500)
+        {
+          ledState = !ledState;
+          digitalWrite(LED_PIN, ledState ? LED_ON : LED_OFF);
+          lastLedToggle = currentTime;
+        }
         if (stateElapsed < STATE_DURATION)
         {
           addCalibrationSample(liftData1, accelX, accelY, accelZ);
@@ -557,13 +586,14 @@ void samplingTask(void *parameter)
         {
           calState = CAL_STAND_2;
           stateStartTime = currentTime;
-          Serial.println("\n╔══════════════════════════════════════════════════════════╗");
-          Serial.println("║  📍 步驟 3/4：再次站立                                   ║");
-          Serial.println("╚══════════════════════════════════════════════════════════╝");
+          digitalWrite(LED_PIN, LED_OFF); // 熄滅 = 固定姿勢
+          Serial.println("[STEP 3/4] 站立 - LED 熄滅 (請保持不動)");
         }
         break;
 
       case CAL_STAND_2:
+        // LED 熄滅 - 固定姿勢站立中
+        digitalWrite(LED_PIN, LED_OFF);
         if (stateElapsed < STATE_DURATION)
         {
           addCalibrationSample(standData2, accelX, accelY, accelZ);
@@ -572,13 +602,20 @@ void samplingTask(void *parameter)
         {
           calState = CAL_LIFT_2;
           stateStartTime = currentTime;
-          Serial.println("\n╔══════════════════════════════════════════════════════════╗");
-          Serial.println("║  🦵 步驟 4/4：最後一次抬腳                               ║");
-          Serial.println("╚══════════════════════════════════════════════════════════╝");
+          lastLedToggle = currentTime;
+          ledState = true;
+          Serial.println("[STEP 4/4] 抬腳 - LED 閃爍 (請抬腿!)");
         }
         break;
 
       case CAL_LIFT_2:
+        // LED 快閃 (每秒2次) - 抬腳中
+        if (currentTime - lastLedToggle >= 500)
+        {
+          ledState = !ledState;
+          digitalWrite(LED_PIN, ledState ? LED_ON : LED_OFF);
+          lastLedToggle = currentTime;
+        }
         if (stateElapsed < STATE_DURATION)
         {
           addCalibrationSample(liftData2, accelX, accelY, accelZ);
@@ -586,13 +623,19 @@ void samplingTask(void *parameter)
         else
         {
           calState = CAL_ANALYZING;
-          Serial.println("\n╔══════════════════════════════════════════════════════════╗");
-          Serial.println("║  🎉 數據收集完成！正在分析...                            ║");
-          Serial.println("╚══════════════════════════════════════════════════════════╝");
+          lastLedToggle = currentTime;
+          Serial.println("[ANALYZING] 分析中 - LED 超快閃");
         }
         break;
 
       case CAL_ANALYZING:
+        // LED 快閃 (每秒3次) - 分析中
+        if (currentTime - lastLedToggle >= 300)
+        {
+          ledState = !ledState;
+          digitalWrite(LED_PIN, ledState ? LED_ON : LED_OFF);
+          lastLedToggle = currentTime;
+        }
         analyzeSensorOrientation();
         calState = CAL_COMPLETE;
         isCalibrated = true;
@@ -600,7 +643,8 @@ void samplingTask(void *parameter)
         initialKneeY = 0;
         initialKneeZ = -THIGH_LENGTH;
         sendCalibrationResult();
-        Serial.println("\n✓ 校正完成！開始正常測量...\n");
+        digitalWrite(LED_PIN, LED_OFF); // 校正完成，LED 熄滅
+        Serial.println("\n✓ 校正完成！LED 熄滅，開始正常測量...\n");
         break;
 
       case CAL_COMPLETE:
@@ -669,18 +713,8 @@ void samplingTask(void *parameter)
     if (displayAngle > 120.0)
       displayAngle = 180.0 - displayAngle;
 
-    // 低通濾波
-    float angleDelta = abs(displayAngle - smoothedAngle);
-    if (angleDelta > 30.0 && smoothedAngle != 0.0)
-    {
-      smoothedAngle = smoothedAngle * 0.95 + displayAngle * 0.05;
-    }
-    else
-    {
-      smoothedAngle = smoothedAngle * (1.0 - SMOOTHING_FACTOR) + displayAngle * SMOOTHING_FACTOR;
-    }
-
-    calibratedAngle = smoothedAngle;
+    // 直接使用校正後的角度，不做額外處理
+    calibratedAngle = displayAngle;
 
     // 計算膝蓋座標
     float angleRad = calibratedAngle * PI / 180.0;
@@ -825,6 +859,23 @@ void setup()
   Serial.begin(115200);
   delay(1000); // 等待穩定
   Serial.println("\n=== ICM-20948 感測器初始化 ===");
+
+  // 初始化 LED 指示燈
+  pinMode(LED_PIN, OUTPUT);
+  Serial.printf("✓ LED 指示燈初始化 (GPIO%d, 低電平點亮)\n", LED_PIN);
+
+  // 開機 LED 測試：閃爍 3 次確認 LED 硬體正常
+  Serial.println("LED 硬體測試：閃爍 3 次...");
+  for (int i = 0; i < 3; i++)
+  {
+    digitalWrite(LED_PIN, LED_ON);
+    Serial.println("  [測試] LED ON");
+    delay(500);
+    digitalWrite(LED_PIN, LED_OFF);
+    Serial.println("  [測試] LED OFF");
+    delay(500);
+  }
+  Serial.println("LED 測試完成");
 
   // 初始化 I2C (ESP32-C3 Super Mini: SDA=GPIO5, SCL=GPIO6)
   Wire.begin(SDA_PIN, SCL_PIN);
