@@ -72,10 +72,10 @@ PubSubClient mqttClient(espClient);
 #define SCL_PIN 6 // ESP32-C3 GPIO6
 
 // LED 指示燈設定 (用於顯示校正狀態)
-// ESP32-C3 Super Mini 內建 LED 在 GPIO8 (低電平點亮)
+// ESP32-C3 Super Mini 內建 LED 在 GPIO8 (高電平點亮)
 #define LED_PIN 8
-#define LED_ON LOW // 內建 LED 是低電平點亮
-#define LED_OFF HIGH
+#define LED_ON HIGH // 內建 LED 是高電平點亮
+#define LED_OFF LOW
 bool ledState = false;
 unsigned long lastLedToggle = 0;
 
@@ -862,20 +862,7 @@ void setup()
 
   // 初始化 LED 指示燈
   pinMode(LED_PIN, OUTPUT);
-  Serial.printf("✓ LED 指示燈初始化 (GPIO%d, 低電平點亮)\n", LED_PIN);
-
-  // 開機 LED 測試：閃爍 3 次確認 LED 硬體正常
-  Serial.println("LED 硬體測試：閃爍 3 次...");
-  for (int i = 0; i < 3; i++)
-  {
-    digitalWrite(LED_PIN, LED_ON);
-    Serial.println("  [測試] LED ON");
-    delay(500);
-    digitalWrite(LED_PIN, LED_OFF);
-    Serial.println("  [測試] LED OFF");
-    delay(500);
-  }
-  Serial.println("LED 測試完成");
+  Serial.printf("✓ LED 指示燈初始化 (GPIO%d)\n", LED_PIN);
 
   // 初始化 I2C (ESP32-C3 Super Mini: SDA=GPIO5, SCL=GPIO6)
   Wire.begin(SDA_PIN, SCL_PIN);
