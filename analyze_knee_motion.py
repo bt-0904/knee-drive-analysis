@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-膝蓋抬腿動作分析腳本+
-分析 knee_data_20251129_090804.csv 中 09:10 之後的資料
+膝蓋抬腿動作分析腳本
+自動讀取最新的 knee_data_*.csv 檔案進行分析
 視覺化抬腳起伏變化
 """
 
@@ -10,6 +10,9 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from datetime import datetime
 import numpy as np
+import glob
+import os
+import re
 
 # 設定中文字體（Windows 系統使用微軟正黑體）
 plt.rcParams["font.sans-serif"] = ["Microsoft JhengHei", "SimHei", "Arial Unicode MS"]
@@ -134,38 +137,82 @@ def visualize_knee_motion(df, output_path="knee_motion_analysis.png"):
     ax3.legend(loc="upper right")
     ax3.grid(True, alpha=0.3)
 
-    # ===== 圖4: 陀螺儀角速度 =====
+    # ===== 圖4: 陀螺儀角速度 / 角度變化率 =====
     ax4 = axes[3]
-    ax4.plot(
-        time_seconds,
-        df["陀螺儀X(deg/s)"],
-        color="#F44336",
-        linewidth=1,
-        alpha=0.8,
-        label="X軸 (前後擺動)",
+
+    # 檢測是否為 Flex Sensor 資料（陀螺儀資料全為 0）
+    gyro_sum = (
+        abs(df["陀螺儀X(deg/s)"].sum())
+        + abs(df["陀螺儀Y(deg/s)"].sum())
+        + abs(df["陀螺儀Z(deg/s)"].sum())
     )
-    ax4.plot(
-        time_seconds,
-        df["陀螺儀Y(deg/s)"],
-        color="#2196F3",
-        linewidth=1,
-        alpha=0.8,
-        label="Y軸 (左右擺動)",
-    )
-    ax4.plot(
-        time_seconds,
-        df["陀螺儀Z(deg/s)"],
-        color="#4CAF50",
-        linewidth=1,
-        alpha=0.8,
-        label="Z軸 (旋轉)",
-    )
-    ax4.axhline(y=0, color="gray", linestyle="--", alpha=0.5)
-    ax4.set_ylabel("角速度 (°/s)", fontsize=11)
-    ax4.set_xlabel("運行時間 (秒)", fontsize=11)
-    ax4.set_title("陀螺儀角速度 (動作劇烈程度)", fontsize=12)
-    ax4.legend(loc="upper right")
-    ax4.grid(True, alpha=0.3)
+    is_flex_sensor = gyro_sum < 1.0  # 幾乎為 0 表示是 Flex Sensor
+
+    if is_flex_sensor:
+        # Flex Sensor 模式：顯示角度變化率（模擬角速度）
+        angle_diff = np.diff(df["角度(deg)"].values, prepend=df["角度(deg)"].values[0])
+        time_diff = np.diff(time_seconds, prepend=time_seconds[0])
+        time_diff[time_diff == 0] = 0.02  # 避免除以零，預設 20ms
+        angular_velocity = angle_diff / time_diff
+
+        ax4.plot(
+            time_seconds,
+            angular_velocity,
+            color="#FF5722",
+            linewidth=1,
+            alpha=0.8,
+            label="角度變化率",
+        )
+        ax4.axhline(y=0, color="gray", linestyle="--", alpha=0.5)
+        ax4.set_ylabel("角度變化率 (°/s)", fontsize=11)
+        ax4.set_xlabel("運行時間 (秒)", fontsize=11)
+        ax4.set_title("角度變化率 (Flex Sensor 模式)", fontsize=12)
+        ax4.legend(loc="upper right")
+        ax4.grid(True, alpha=0.3)
+
+        # 添加說明文字
+        ax4.text(
+            0.98,
+            0.02,
+            "📊 Flex Sensor 資料\n（無陀螺儀）",
+            transform=ax4.transAxes,
+            fontsize=9,
+            verticalalignment="bottom",
+            horizontalalignment="right",
+            bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
+        )
+    else:
+        # IMU 模式：顯示陀螺儀資料
+        ax4.plot(
+            time_seconds,
+            df["陀螺儀X(deg/s)"],
+            color="#F44336",
+            linewidth=1,
+            alpha=0.8,
+            label="X軸 (前後擺動)",
+        )
+        ax4.plot(
+            time_seconds,
+            df["陀螺儀Y(deg/s)"],
+            color="#2196F3",
+            linewidth=1,
+            alpha=0.8,
+            label="Y軸 (左右擺動)",
+        )
+        ax4.plot(
+            time_seconds,
+            df["陀螺儀Z(deg/s)"],
+            color="#4CAF50",
+            linewidth=1,
+            alpha=0.8,
+            label="Z軸 (旋轉)",
+        )
+        ax4.axhline(y=0, color="gray", linestyle="--", alpha=0.5)
+        ax4.set_ylabel("角速度 (°/s)", fontsize=11)
+        ax4.set_xlabel("運行時間 (秒)", fontsize=11)
+        ax4.set_title("陀螺儀角速度 (動作劇烈程度)", fontsize=12)
+        ax4.legend(loc="upper right")
+        ax4.grid(True, alpha=0.3)
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches="tight")
@@ -228,17 +275,38 @@ def detect_leg_raises(df, threshold=60):
     return high_raises
 
 
+def find_latest_csv(pattern="knee_data_*.csv"):
+    """找到最新的 CSV 檔案（依檔名時間戳記排序）"""
+    # 取得符合 pattern 的所有檔案
+    csv_files = glob.glob(pattern)
+
+    # 排除 calibration 檔案
+    csv_files = [f for f in csv_files if "calibration" not in f]
+
+    if not csv_files:
+        raise FileNotFoundError(f"找不到符合 '{pattern}' 的 CSV 檔案")
+
+    # 依檔名中的時間戳記排序（YYYYMMDD_HHMMSS 格式）
+    def extract_timestamp(filename):
+        match = re.search(r"knee_data_(\d{8}_\d{6})\.csv", filename)
+        return match.group(1) if match else "00000000_000000"
+
+    latest_file = max(csv_files, key=extract_timestamp)
+    return latest_file
+
+
 # ===== 主程式 =====
 if __name__ == "__main__":
-    # 設定檔案路徑
-    csv_file = "knee_data_20251129_090804.csv"
+    # 自動尋找最新的 CSV 檔案
+    csv_file = find_latest_csv()
 
     print("=" * 60)
     print("🦵 膝蓋抬腿動作分析系統")
     print("=" * 60)
+    print(f"📂 讀取檔案: {csv_file}")
 
-    # 1. 載入並篩選資料
-    df = load_and_filter_data(csv_file, start_time_str="09:10:00")
+    # 1. 載入並篩選資料（移除固定時間篩選）
+    df = load_and_filter_data(csv_file, start_time_str="00:00:00")
 
     # 2. 統計分析
     stats = analyze_leg_raise(df)

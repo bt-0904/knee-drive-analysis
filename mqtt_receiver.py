@@ -117,16 +117,27 @@ def on_message(client, userdata, msg):
             return
 
         elif msg_type == "calibration_complete":
-            # 校正完成訊息
+            # 校正完成訊息（相容 IMU 和 Flex Sensor 版本）
             print("\n" + "=" * 60)
             print("✓ 校正完成！")
-            print(f"  主軸: {['X', 'Y', 'Z'][data.get('primary_axis', 0)]}")
-            print(f"  重力軸: {['X', 'Y', 'Z'][data.get('gravity_axis', 0)]}")
-            print(
-                f"  軸向符號: {'+1 (抬腳增加)' if data.get('axis_sign', 1) > 0 else '-1 (抬腳減少)'}"
-            )
-            print(f"  站立平均值: {data.get('stand_avg', 0):.3f}")
-            print(f"  抬腳平均值: {data.get('lift_avg', 0):.3f}")
+
+            # 檢查是 Flex Sensor 還是 IMU 版本
+            sensor_type = data.get("sensor_type", "imu")
+            if sensor_type == "flex_sensor":
+                # Flex Sensor 版本
+                print(f"  感測器類型: Flex Sensor")
+                print(f"  平直 ADC: {data.get('flat_adc', 0)}")
+                print(f"  彎曲 ADC: {data.get('bent_adc', 0)}")
+                print(f"  ADC 範圍: {data.get('adc_range', 0)}")
+            else:
+                # IMU 版本
+                print(f"  主軸: {['X', 'Y', 'Z'][data.get('primary_axis', 0)]}")
+                print(f"  重力軸: {['X', 'Y', 'Z'][data.get('gravity_axis', 0)]}")
+                print(
+                    f"  軸向符號: {'+1 (抬腳增加)' if data.get('axis_sign', 1) > 0 else '-1 (抬腳減少)'}"
+                )
+                print(f"  站立平均值: {data.get('stand_avg', 0):.3f}")
+                print(f"  抬腳平均值: {data.get('lift_avg', 0):.3f}")
             print("=" * 60)
             print("\n開始接收測量資料...")
             return
