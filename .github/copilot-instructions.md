@@ -74,14 +74,12 @@
 
 ```json
 {"type":"batch","n":25,"d":[
-  {"t":1.23,"a":45.0,"s":1,"dy":28.3,"dz":-12.5,"ax":0,"ay":0,"az":0,"gx":0,"gy":0,"gz":0},
+  {"t":1.23,"a":45.0,"s":1,"dy":28.3,"dz":-12.5},
   ...
 ]}
 ```
 
 欄位縮寫：`t`=timestamp, `a`=angle, `s`=stable, `dy/dz`=delta
-
-> ⚠️ Flex Sensor 版本 `ax/ay/az/gx/gy/gz` 固定為 0（無 IMU 資料）
 
 ## 程式碼慣例
 
