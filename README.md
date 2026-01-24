@@ -1,34 +1,36 @@
-# 膝蓋抬腿動作分析系統 (Knee Drive Analysis)
+# Knee Drive Analysis System
 
-## 專案簡介
+> [中文版 README](README_TW.md)
 
-本專案使用 **ESP32-C3** 與 **Flex Sensor（彎曲感測器）**，透過 **Wi-Fi + MQTT** 無線傳輸即時分析跑步時的膝蓋抬腿動作。系統可記錄大腿角度、膝蓋位置座標等數據，量化分析不同抬腿高度對跑步效率的影響。
+## Overview
 
-### 核心特色
+This project uses an **ESP32-C3** microcontroller with a **Flex Sensor** to analyze knee drive motion during running via **Wi-Fi + MQTT** wireless transmission. The system records thigh angle and knee position coordinates to quantify how different knee lift heights affect running efficiency.
 
-- ✅ **Flex Sensor 角度感測**：簡單可靠的彎曲角度偵測
-- ✅ **FreeRTOS 雙任務架構**：取樣與傳輸分離，確保資料完整性
-- ✅ **50Hz 高頻取樣 + 2Hz 批次傳輸**：降低網路負擔、提升效率
-- ✅ **Ring Buffer 緩衝機制**：可承受 4 秒網路中斷不遺失資料
-- ✅ **固定 Offset 校正**：一次校正、長期使用，無需每次重新校正
-- ✅ **即時座標計算**：膝蓋 Y/Z 軸位置追蹤
-- ✅ **CSV 資料儲存**：完整記錄供後續分析
+### Key Features
 
-## 硬體配置
+- ✅ **Flex Sensor Angle Detection**: Simple and reliable bend angle measurement
+- ✅ **FreeRTOS Dual-Task Architecture**: Separated sampling and transmission for data integrity
+- ✅ **50Hz Sampling + 2Hz Batch Transmission**: Reduced network overhead, improved efficiency
+- ✅ **Ring Buffer Mechanism**: Tolerates up to 4 seconds of network interruption without data loss
+- ✅ **Fixed Offset Calibration**: One-time calibration for long-term use
+- ✅ **Real-time Coordinate Calculation**: Knee Y/Z axis position tracking
+- ✅ **CSV Data Storage**: Complete recording for subsequent analysis
 
-### 零件清單
+## Hardware Requirements
 
-| 零件                | 規格                    | 數量 |
-| ------------------- | ----------------------- | ---- |
-| ESP32-C3 Super Mini | RISC-V 架構，Wi-Fi/BLE  | 1    |
-| Flex Sensor         | 2.2" 或 4.5" 彎曲感測器 | 1    |
-| 電阻                | 10KΩ (1/4W)             | 1    |
-| 鋰電池              | 3.7V (18650/103450)     | 1    |
-| 充放電模組          | TP4056 或類似           | 1    |
+### Bill of Materials
 
-### 接線配置
+| Component              | Specification                  | Qty |
+| ---------------------- | ------------------------------ | --- |
+| ESP32-C3 Super Mini    | RISC-V architecture, Wi-Fi/BLE | 1   |
+| Flex Sensor            | 2.2" or 4.5" bend sensor       | 1   |
+| Resistor               | 10KΩ (1/4W)                    | 1   |
+| Lithium Battery        | 3.7V (18650/103450)            | 1   |
+| Battery Charging Board | TP4056 or similar              | 1   |
 
-#### Flex Sensor 分壓電路
+### Wiring Configuration
+
+#### Flex Sensor Voltage Divider Circuit
 
 ```
 3.3V ──────┬────── Flex Sensor ──────┬────── GPIO4 (ADC)
@@ -36,344 +38,345 @@
            └─────── 10KΩ ────────────┴────── GND
 ```
 
-| 連接點                         | ESP32-C3 Super Mini |
-| ------------------------------ | ------------------- |
-| Flex Sensor 一端               | 3.3V                |
-| Flex Sensor 另一端 + 10KΩ 一端 | GPIO4 (ADC 輸入)    |
-| 10KΩ 另一端                    | GND                 |
+| Connection Point                     | ESP32-C3 Super Mini |
+| ------------------------------------ | ------------------- |
+| Flex Sensor (one end)                | 3.3V                |
+| Flex Sensor (other end) + 10KΩ (end) | GPIO4 (ADC Input)   |
+| 10KΩ (other end)                     | GND                 |
 
-#### 電源系統
+#### Power System
 
-| 充放電模組 | ESP32-C3 Super Mini |
-| ---------- | ------------------- |
-| OUT+       | 5V (透過 Type-C)    |
-| OUT-       | GND                 |
-| BAT+       | 鋰電池正極          |
-| BAT-       | 鋰電池負極          |
+| Charging Module | ESP32-C3 Super Mini  |
+| --------------- | -------------------- |
+| OUT+            | 5V (via Type-C)      |
+| OUT-            | GND                  |
+| BAT+            | Battery Positive (+) |
+| BAT-            | Battery Negative (-) |
 
-### 系統電路圖
+### System Circuit Diagram
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                      電源系統                                │
+│                      Power System                            │
 │  ┌──────────┐      ┌──────────┐      ┌──────────────────┐   │
 │  │ 3.7V     │      │ TP4056   │      │ ESP32-C3         │   │
-│  │ 鋰電池   │─BAT→─│ 充放電   │─OUT→─│ Super Mini       │   │
-│  └──────────┘      │ 模組     │      │                  │   │
-│                    └──────────┘      │   ┌────────────┐ │   │
+│  │ Li-ion   │─BAT→─│ Charging │─OUT→─│ Super Mini       │   │
+│  │ Battery  │      │ Module   │      │                  │   │
+│  └──────────┘      └──────────┘      │   ┌────────────┐ │   │
 │                                      │   │ GPIO4 (ADC)│←┼───┼─── Flex Sensor
-│                                      │   │ GPIO8 (LED)│ │   │    + 10KΩ 分壓
+│                                      │   │ GPIO8 (LED)│ │   │    + 10KΩ Divider
 │                                      │   │ 3.3V / GND │ │   │
 │                                      │   └────────────┘ │   │
 │                                      └──────────────────┘   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**注意事項**：
+**Important Notes**:
 
-- **GPIO4** 用於 ADC 輸入（ADC1_CH4），避開 strapping pins
-- **GPIO8** 為內建 LED（LOW = 亮，HIGH = 滅）
-- 10KΩ 電阻與 Flex Sensor 形成分壓電路，將彎曲程度轉換為電壓變化
+- **GPIO4** is used for ADC input (ADC1_CH4), avoiding strapping pins
+- **GPIO8** is the onboard LED (LOW = ON, HIGH = OFF)
+- The 10KΩ resistor and Flex Sensor form a voltage divider, converting bend angle to voltage change
 
-## 軟體環境
+## Software Requirements
 
-### ESP32 開發環境
+### ESP32 Development Environment
 
-- **開發平台**: PlatformIO
-- **框架**: Arduino
-- **主控晶片**: ESP32-C3
-- **程式語言**: C++
-- **通訊協定**: Wi-Fi + MQTT
+- **Platform**: PlatformIO
+- **Framework**: Arduino
+- **MCU**: ESP32-C3
+- **Language**: C++
+- **Protocol**: Wi-Fi + MQTT
 
-### 資料接收環境
+### Data Receiver Environment
 
-- **程式語言**: Python 3.x
-- **必要套件**: paho-mqtt
-- **資料格式**: JSON (批次) → CSV
+- **Language**: Python 3.x
+- **Required Packages**: paho-mqtt
+- **Data Format**: JSON (batch) → CSV
 
-## 系統架構
+## System Architecture
 
-### 資料流程
+### Data Flow
 
 ```
-Flex Sensor ADC (50Hz) → FreeRTOS Ring Buffer (200筆) → MQTT 批次 (2Hz) → Python → CSV
+Flex Sensor ADC (50Hz) → FreeRTOS Ring Buffer (200 samples) → MQTT Batch (2Hz) → Python → CSV
 ```
 
-### FreeRTOS 雙任務架構
+### FreeRTOS Dual-Task Architecture
 
 ```
 ┌─────────────────┐    Ring Buffer    ┌─────────────────┐
 │  samplingTask   │ ──────────────→  │  transmitTask   │
-│  (50Hz, Core 0) │   Mutex 保護      │  (2Hz, Core 0)  │
-│  優先權 3       │   200 筆容量      │  優先權 1       │
+│  (50Hz, Core 0) │   Mutex Protected │  (2Hz, Core 0)  │
+│  Priority 3     │   200 samples     │  Priority 1     │
 │  Stack: 4KB     │                   │  Stack: 8KB     │
 └─────────────────┘                   └─────────────────┘
         ↓                                     ↓
-   讀取 ADC 值                           批次 JSON 封裝
-   角度計算                              MQTT 發送 (25筆/批)
-   座標轉換                              統計資訊輸出
-   寫入 Buffer
+   Read ADC Value                        Batch JSON Packaging
+   Angle Calculation                     MQTT Transmission (25/batch)
+   Coordinate Transform                  Statistics Output
+   Write to Buffer
 ```
 
-### 整體系統架構
+### Overall System Architecture
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
-│                        感測層 (ESP32-C3)                            │
+│                      Sensor Layer (ESP32-C3)                        │
 │  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐            │
 │  │ Flex Sensor  │──→│ samplingTask │──→│ Ring Buffer  │            │
-│  │ ADC (50Hz)   │   │ 角度/座標計算 │   │ (200 筆)     │            │
+│  │ ADC (50Hz)   │   │ Angle/Coord  │   │ (200 samples)│            │
 │  └──────────────┘   └──────────────┘   └──────┬───────┘            │
 │                                               │                     │
 │                     ┌──────────────┐          │                     │
 │                     │ transmitTask │←─────────┘                     │
-│                     │ 批次 JSON    │                                │
+│                     │ Batch JSON   │                                │
 │                     └──────┬───────┘                                │
 └────────────────────────────┼───────────────────────────────────────┘
                              │ Wi-Fi + MQTT
                              ↓
 ┌────────────────────────────────────────────────────────────────────┐
-│                         傳輸層                                      │
+│                      Transport Layer                                │
 │  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐            │
-│  │ 手機熱點     │──→│ 4G/5G 網路   │──→│ MQTT Broker  │            │
-│  │ SSID: Bt     │   │ 網際網路     │   │ 雲端伺服器   │            │
+│  │ Mobile       │──→│ 4G/5G        │──→│ MQTT Broker  │            │
+│  │ Hotspot      │   │ Network      │   │ Cloud Server │            │
 │  └──────────────┘   └──────────────┘   └──────┬───────┘            │
 └────────────────────────────────────────────────┼───────────────────┘
-                                                 │ 網際網路
+                                                 │ Internet
                                                  ↓
 ┌────────────────────────────────────────────────────────────────────┐
-│                       接收層 (電腦)                                 │
+│                      Receiver Layer (Computer)                      │
 │  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐            │
-│  │ Python       │──→│ 解析 JSON    │──→│ CSV 儲存     │            │
-│  │ mqtt_receiver│   │ 批次資料     │   │ 時間戳記檔名 │            │
+│  │ Python       │──→│ Parse JSON   │──→│ CSV Storage  │            │
+│  │ mqtt_receiver│   │ Batch Data   │   │ Timestamped  │            │
 │  └──────────────┘   └──────────────┘   └──────────────┘            │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
-### 核心演算法說明
+### Core Algorithms
 
-#### 1. ADC 轉角度（線性映射）
+#### 1. ADC to Angle Conversion (Linear Mapping)
 
 ```cpp
-// Flex Sensor ADC 值越低 = 彎曲角度越大（電阻反比）
+// Flex Sensor: Lower ADC value = Greater bend angle (inverse resistance)
 float angle = (float)(OFFSET_FLAT_ADC - rawValue) / (OFFSET_FLAT_ADC - OFFSET_BENT_ADC) * 90.0;
 ```
 
-**參數說明**：
+**Parameters**:
 
-- `OFFSET_FLAT_ADC`：Flex Sensor 平直時（0°）的 ADC 讀數（約 2358）
-- `OFFSET_BENT_ADC`：Flex Sensor 彎曲時（90°）的 ADC 讀數（約 1737）
-- 輸出範圍：0°（站立）~ 90°（膝蓋水平）
+- `OFFSET_FLAT_ADC`: ADC reading when Flex Sensor is flat (0°), approximately 2358
+- `OFFSET_BENT_ADC`: ADC reading when Flex Sensor is bent (90°), approximately 1737
+- Output range: 0° (standing) to 90° (knee horizontal)
 
-#### 2. 座標轉換公式
+#### 2. Coordinate Transformation
 
 ```cpp
-// 極坐標 → 直角座標（髖關節為原點）
+// Polar to Cartesian coordinates (hip joint as origin)
 float angleRad = angle * PI / 180.0;
-kneeY = THIGH_LENGTH * sin(angleRad);   // 前後位移 (0~45cm)
-kneeZ = -THIGH_LENGTH * cos(angleRad);  // 上下位移 (-45~0cm)
+kneeY = THIGH_LENGTH * sin(angleRad);   // Forward/backward displacement (0~45cm)
+kneeZ = -THIGH_LENGTH * cos(angleRad);  // Up/down displacement (-45~0cm)
 ```
 
-**座標系定義**：
+**Coordinate System Definition**:
 
-- 原點 (0, 0)：髖關節位置
-- Y 軸：前後方向（正值 = 往前）
-- Z 軸：上下方向（負值 = 往下）
-- 站立時：kneeZ ≈ -45cm（膝蓋在髖關節正下方）
+- Origin (0, 0): Hip joint position
+- Y-axis: Forward/backward direction (positive = forward)
+- Z-axis: Up/down direction (negative = downward)
+- Standing position: kneeZ ≈ -45cm (knee directly below hip)
 
-## 🔧 Flex Sensor 校正教學
+## 🔧 Flex Sensor Calibration Guide
 
-### 為什麼需要校正？
+### Why Calibration?
 
-每個 Flex Sensor 的電阻特性略有不同，校正可確保角度計算的準確性。**校正只需進行一次**，之後數值會儲存在程式碼中。
+Each Flex Sensor has slightly different resistance characteristics. Calibration ensures accurate angle calculation. **Calibration only needs to be done once**, and the values are stored in the code.
 
-### 校正步驟
+### Calibration Steps
 
-#### 步驟 1：準備硬體
+#### Step 1: Prepare Hardware
 
-1. 完成 Flex Sensor 接線（參考上方接線配置）
-2. 用 USB 連接 ESP32 到電腦
-3. 將 Flex Sensor 固定在大腿上（或用手模擬）
+1. Complete Flex Sensor wiring (refer to wiring configuration above)
+2. Connect ESP32 to computer via USB
+3. Attach Flex Sensor to thigh (or simulate by hand)
 
-#### 步驟 2：觀察 ADC 讀數
+#### Step 2: Observe ADC Readings
 
-1. 使用 PlatformIO 開啟 **Serial Monitor**（115200 baud）
-2. 上傳程式後，觀察序列埠輸出的 `ADC` 欄位
+1. Open **Serial Monitor** in PlatformIO (115200 baud)
+2. After uploading the program, observe the `ADC` field in serial output
 
-#### 步驟 3：記錄兩個姿勢的 ADC 值
+#### Step 3: Record ADC Values for Two Positions
 
-| 姿勢            | 說明                 | 記錄的 ADC 值 |
-| --------------- | -------------------- | ------------- |
-| **平直（0°）**  | 站立姿勢，腿完全伸直 | 例如：2358    |
-| **彎曲（90°）** | 膝蓋抬至水平位置     | 例如：1737    |
+| Position       | Description                  | Recorded ADC Value |
+| -------------- | ---------------------------- | ------------------ |
+| **Flat (0°)**  | Standing, leg fully extended | e.g., 2358         |
+| **Bent (90°)** | Knee raised to horizontal    | e.g., 1737         |
 
-> 💡 **提示**：保持姿勢 3-5 秒，讀取穩定的 ADC 平均值
+> 💡 **Tip**: Hold each position for 3-5 seconds to get a stable average ADC reading
 
-#### 步驟 4：更新程式碼常數
+#### Step 4: Update Code Constants
 
-編輯 `src/main.cpp`（約第 48-49 行）：
+Edit `src/main.cpp` (around lines 48-49):
 
 ```cpp
-// ===== 固定校正 Offset（預先量測的基準值） =====
-#define OFFSET_FLAT_ADC 2358  // ← 替換為你的平直 ADC 值
-#define OFFSET_BENT_ADC 1737  // ← 替換為你的彎曲 ADC 值
+// ===== Fixed Calibration Offset (Pre-measured baseline values) =====
+#define OFFSET_FLAT_ADC 2358  // ← Replace with your flat ADC value
+#define OFFSET_BENT_ADC 1737  // ← Replace with your bent ADC value
 ```
 
-#### 步驟 5：重新上傳程式
+#### Step 5: Re-upload Program
 
-1. 使用 PlatformIO **Upload** 上傳新程式
-2. 觀察 Serial Monitor，確認角度顯示正確：
-   - 站立時顯示約 0°
-   - 膝蓋水平時顯示約 90°
+1. Use PlatformIO **Upload** to flash the new program
+2. Check Serial Monitor to verify correct angle display:
+   - Standing should show approximately 0°
+   - Knee horizontal should show approximately 90°
 
-### 校正驗證
+### Calibration Verification
 
-| 檢查項目       | 預期結果       |
-| -------------- | -------------- |
-| 站立時角度     | 0° ± 5°        |
-| 膝蓋水平時角度 | 90° ± 5°       |
-| 角度變化方向   | 抬腿時角度增加 |
+| Check Item             | Expected Result                  |
+| ---------------------- | -------------------------------- |
+| Standing angle         | 0° ± 5°                          |
+| Knee horizontal angle  | 90° ± 5°                         |
+| Angle change direction | Angle increases when lifting leg |
 
-> ⚠️ 如果角度方向相反，交換 `OFFSET_FLAT_ADC` 和 `OFFSET_BENT_ADC` 的值
+> ⚠️ If angle direction is reversed, swap `OFFSET_FLAT_ADC` and `OFFSET_BENT_ADC` values
 
-## 專案結構
+## Project Structure
 
 ```
 knee-drive-analysis/
-├── platformio.ini           # PlatformIO 配置文件
+├── platformio.ini           # PlatformIO configuration file
 ├── src/
-│   └── main.cpp             # ESP32 主程式 (FreeRTOS + MQTT)
-├── include/                 # 標頭檔
-├── lib/                     # 專案函式庫
-├── test/                    # 測試程式
-├── mqtt_receiver.py         # Python MQTT 資料接收腳本
-├── analyze_knee_motion.py   # Python 資料分析與視覺化
-├── USAGE.md                 # 詳細使用說明
-├── README.md                # 專案說明（本檔案）
+│   └── main.cpp             # ESP32 main program (FreeRTOS + MQTT)
+├── include/                 # Header files
+├── lib/                     # Project libraries
+├── test/                    # Test programs
+├── mqtt_receiver.py         # Python MQTT data receiver script
+├── analyze_knee_motion.py   # Python data analysis and visualization
+├── USAGE.md                 # Detailed usage guide
+├── README.md                # Project description (this file)
+├── README_TW.md             # Chinese version README
 └── .github/
-    └── copilot-instructions.md  # AI 開發規範
+    └── copilot-instructions.md  # AI development guidelines
 ```
 
-## 快速開始
+## Quick Start
 
-### 步驟 1：硬體準備
+### Step 1: Hardware Setup
 
-1. 按照接線配置連接 ESP32-C3 與 Flex Sensor
-2. 連接 3.7V 鋰電池到充放電模組（注意正負極）
-3. 將充放電模組的輸出透過 Type-C 連接到 ESP32-C3 Super Mini
-4. 準備手機開啟 Wi-Fi 熱點（SSID: `Bt`, 密碼: `bt_980904`）
+1. Connect ESP32-C3 and Flex Sensor according to wiring configuration
+2. Connect 3.7V lithium battery to charging module (mind polarity)
+3. Connect charging module output to ESP32-C3 Super Mini via Type-C
+4. Prepare mobile phone with Wi-Fi hotspot enabled (SSID: `Bt`, Password: `bt_980904`)
 
-### 步驟 2：上傳 ESP32 程式
+### Step 2: Upload ESP32 Program
 
-1. 安裝 [Visual Studio Code](https://code.visualstudio.com/)
-2. 安裝 [PlatformIO IDE](https://platformio.org/install/ide?install=vscode) 擴充功能
-3. 用 USB 連接 ESP32 到電腦
-4. （可選）修改 `src/main.cpp` 中的 Wi-Fi 設定
-5. 點擊 PlatformIO 側邊欄的 **Upload** 按鈕
+1. Install [Visual Studio Code](https://code.visualstudio.com/)
+2. Install [PlatformIO IDE](https://platformio.org/install/ide?install=vscode) extension
+3. Connect ESP32 to computer via USB
+4. (Optional) Modify Wi-Fi settings in `src/main.cpp`
+5. Click **Upload** button in PlatformIO sidebar
 
-**首次上傳注意**：
+**First Upload Note**:
 
-- 按住 **BOOT** 按鈕 → 按下 **RESET** → 釋放 → 開始上傳
+- Hold **BOOT** button → Press **RESET** → Release → Start upload
 
-### 步驟 3：校正 Flex Sensor
+### Step 3: Calibrate Flex Sensor
 
-首次使用請參考上方「🔧 Flex Sensor 校正教學」章節。
+For first-time use, refer to the "🔧 Flex Sensor Calibration Guide" section above.
 
-### 步驟 4：安裝 Python 環境
+### Step 4: Install Python Environment
 
 ```bash
-# 安裝必要套件
+# Install required packages
 pip install paho-mqtt matplotlib pandas numpy
 ```
 
-### 步驟 5：開始資料採集
+### Step 5: Start Data Collection
 
-1. 手機開啟熱點（提供 ESP32 網路連線）
-2. ESP32 開機（會自動連接 Wi-Fi 並開始傳輸）
-3. 在電腦執行接收腳本：
+1. Enable mobile hotspot (provides ESP32 network connection)
+2. Power on ESP32 (will automatically connect to Wi-Fi and start transmission)
+3. Run receiver script on computer:
    ```bash
    python mqtt_receiver.py
    ```
-4. 開始跑步，資料會即時儲存為 CSV
+4. Start running, data will be saved to CSV in real-time
 
-### 步驟 6：資料分析
+### Step 6: Data Analysis
 
 ```bash
 python analyze_knee_motion.py
 ```
 
-### 完整使用說明
+### Complete Usage Guide
 
-請參閱 [USAGE.md](USAGE.md) 獲取詳細的設定與使用指南。
+Please refer to [USAGE.md](USAGE.md) for detailed setup and usage instructions.
 
-## 功能特點
+## Features
 
-### 已完成功能 ✅
+### Completed ✅
 
-- [x] Flex Sensor ADC 讀取（50Hz 取樣）
-- [x] FreeRTOS 雙任務架構（取樣 + 傳輸分離）
-- [x] Ring Buffer 緩衝機制（200 筆容量）
-- [x] 移動平均濾波（5 點平滑）
-- [x] Wi-Fi 連線功能
-- [x] MQTT 批次資料傳輸（2Hz, 25 筆/批）
-- [x] 固定 Offset 校正系統
-- [x] 膝蓋 Y/Z 座標計算（相對髖關節）
-- [x] 穩定度偵測
-- [x] 即時資料顯示（序列埠 + MQTT）
-- [x] Python 資料接收腳本（支援批次格式）
-- [x] CSV 格式資料儲存
-- [x] 資料分析與視覺化腳本
+- [x] Flex Sensor ADC reading (50Hz sampling)
+- [x] FreeRTOS dual-task architecture (sampling + transmission separated)
+- [x] Ring Buffer mechanism (200 sample capacity)
+- [x] Moving average filter (5-point smoothing)
+- [x] Wi-Fi connectivity
+- [x] MQTT batch data transmission (2Hz, 25 samples/batch)
+- [x] Fixed Offset calibration system
+- [x] Knee Y/Z coordinate calculation (relative to hip joint)
+- [x] Stability detection
+- [x] Real-time data display (Serial + MQTT)
+- [x] Python data receiver script (batch format support)
+- [x] CSV format data storage
+- [x] Data analysis and visualization script
 
-### 開發中功能 🚧
+### In Development 🚧
 
-- [ ] 跑步效率評估演算法
-- [ ] 網頁即時視覺化介面
-- [ ] 歷史資料分析工具
+- [ ] Running efficiency evaluation algorithm
+- [ ] Web-based real-time visualization interface
+- [ ] Historical data analysis tools
 
-## 研究目標
+## Research Goals
 
-1. **數據收集**：記錄不同跑步速度下的膝蓋運動數據
-2. **特徵提取**：分析抬腿高度、頻率等關鍵指標
-3. **效率評估**：建立抬腿高度與跑步效率的關聯模型
-4. **最佳化建議**：根據分析結果提供個人化的跑步姿勢建議
+1. **Data Collection**: Record knee motion data at different running speeds
+2. **Feature Extraction**: Analyze key metrics like lift height and frequency
+3. **Efficiency Evaluation**: Establish correlation model between knee lift height and running efficiency
+4. **Optimization Suggestions**: Provide personalized running posture recommendations based on analysis
 
-## 技術規格
+## Technical Specifications
 
-### 硬體規格
+### Hardware Specifications
 
-| 項目       | 規格                          |
-| ---------- | ----------------------------- |
-| 感測器     | Flex Sensor（彎曲感測器）     |
-| ADC 腳位   | GPIO4 (ADC1_CH4)              |
-| LED 腳位   | GPIO8（內建 LED）             |
-| 取樣頻率   | 50 Hz                         |
-| 傳輸頻率   | 2 Hz（每 500ms 發送一批）     |
-| 批次大小   | 25 筆/批                      |
-| 緩衝區容量 | 200 筆（可承受 4 秒網路中斷） |
-| 工作電壓   | 3.0V - 4.2V（鋰電池供電）     |
-| 工作電流   | 約 80-150mA（Wi-Fi 連線時）   |
+| Item              | Specification                              |
+| ----------------- | ------------------------------------------ |
+| Sensor            | Flex Sensor (bend sensor)                  |
+| ADC Pin           | GPIO4 (ADC1_CH4)                           |
+| LED Pin           | GPIO8 (onboard LED)                        |
+| Sampling Rate     | 50 Hz                                      |
+| Transmission Rate | 2 Hz (one batch every 500ms)               |
+| Batch Size        | 25 samples/batch                           |
+| Buffer Capacity   | 200 samples (tolerates 4s network outage)  |
+| Operating Voltage | 3.0V - 4.2V (lithium battery powered)      |
+| Operating Current | Approx. 80-150mA (during Wi-Fi connection) |
 
-### 軟體規格
+### Software Specifications
 
-| 項目          | 規格                                     |
-| ------------- | ---------------------------------------- |
-| 序列埠速率    | 115200 baud                              |
-| MQTT QoS      | 0（最多一次傳送）                        |
-| JSON 格式     | 批次格式 `{"type":"batch",...}`          |
-| 大腿長度      | 45 cm（可調整）                          |
-| 濾波器        | 移動平均（5 點）                         |
-| FreeRTOS 任務 | samplingTask (50Hz) + transmitTask (2Hz) |
+| Item             | Specification                            |
+| ---------------- | ---------------------------------------- |
+| Serial Baud Rate | 115200 baud                              |
+| MQTT QoS         | 0 (at most once delivery)                |
+| JSON Format      | Batch format `{"type":"batch",...}`      |
+| Thigh Length     | 45 cm (adjustable)                       |
+| Filter           | Moving average (5-point)                 |
+| FreeRTOS Tasks   | samplingTask (50Hz) + transmitTask (2Hz) |
 
-### 資料格式
+### Data Format
 
-- **傳輸格式**: JSON（批次）
-- **儲存格式**: CSV (UTF-8 with BOM)
-- **時間戳記**: 毫秒精度
-- **座標系統**: Y/Z 二維座標（髖關節為原點）
+- **Transmission Format**: JSON (batch)
+- **Storage Format**: CSV (UTF-8 with BOM)
+- **Timestamp**: Millisecond precision
+- **Coordinate System**: Y/Z 2D coordinates (hip joint as origin)
 
-## 資料輸出格式
+## Data Output Format
 
-### MQTT JSON 格式（批次版）
+### MQTT JSON Format (Batch)
 
 ```json
 {
@@ -398,75 +401,75 @@ python analyze_knee_motion.py
 }
 ```
 
-**欄位說明**：
+**Field Descriptions**:
 
-| 欄位 | 說明                  | 單位 |
-| ---- | --------------------- | ---- |
-| `t`  | 運行時間 (timestamp)  | 秒   |
-| `a`  | 大腿抬起角度 (angle)  | 度   |
-| `s`  | 是否穩定 (stable)     | 0/1  |
-| `dy` | 膝蓋前後位移 (deltaY) | 公分 |
-| `dz` | 膝蓋上下位移 (deltaZ) | 公分 |
+| Field | Description                  | Unit    |
+| ----- | ---------------------------- | ------- |
+| `t`   | Runtime (timestamp)          | seconds |
+| `a`   | Thigh lift angle             | degrees |
+| `s`   | Stability flag               | 0/1     |
+| `dy`  | Knee forward/backward offset | cm      |
+| `dz`  | Knee up/down offset          | cm      |
 
-### CSV 欄位
+### CSV Columns
 
-| 欄位        | 說明           | 單位  |
-| ----------- | -------------- | ----- |
-| 時間戳記    | 資料接收時間   | -     |
-| 運行時間(s) | ESP32 運行時間 | 秒    |
-| 角度(deg)   | 大腿抬起角度   | 度    |
-| ΔY(cm)      | 膝蓋前後位移   | 公分  |
-| ΔZ(cm)      | 膝蓋上下位移   | 公分  |
-| 是否穩定    | 數值穩定狀態   | 是/否 |
+| Column     | Description       | Unit    |
+| ---------- | ----------------- | ------- |
+| Timestamp  | Data receive time | -       |
+| Runtime(s) | ESP32 runtime     | seconds |
+| Angle(deg) | Thigh lift angle  | degrees |
+| ΔY(cm)     | Knee forward/back | cm      |
+| ΔZ(cm)     | Knee up/down      | cm      |
+| Stable     | Value stability   | Yes/No  |
 
-## 故障排除
+## Troubleshooting
 
-### Flex Sensor 相關問題
+### Flex Sensor Issues
 
-- **ADC 讀數不變化**
-  - 檢查 Flex Sensor 接線是否正確
-  - 確認 10KΩ 電阻已正確連接
-  - 檢查 GPIO4 腳位是否接觸良好
+- **ADC reading not changing**
+  - Check Flex Sensor wiring connections
+  - Verify 10KΩ resistor is properly connected
+  - Check GPIO4 pin contact
 
-- **角度計算不準確**
-  - 重新進行校正程序
-  - 確認 `OFFSET_FLAT_ADC` 和 `OFFSET_BENT_ADC` 數值正確
-  - 檢查 Flex Sensor 是否固定牢靠
+- **Inaccurate angle calculation**
+  - Re-run calibration procedure
+  - Verify `OFFSET_FLAT_ADC` and `OFFSET_BENT_ADC` values are correct
+  - Check if Flex Sensor is securely attached
 
-### Wi-Fi 無法連線
+### Wi-Fi Connection Failed
 
-- 檢查手機熱點是否開啟
-- 確認 SSID 和密碼正確（區分大小寫）
-- ESP32 與手機距離保持 5-10 公尺內
+- Check if mobile hotspot is enabled
+- Verify SSID and password are correct (case-sensitive)
+- Keep ESP32 within 5-10 meters of phone
 
-### MQTT 發送失敗
+### MQTT Transmission Failed
 
-- 查看序列埠的狀態輸出
-- 確認網路連線正常
-- 檢查 MQTT 伺服器是否可用
+- Check serial monitor status output
+- Verify network connection is stable
+- Check if MQTT broker is accessible
 
-### 資料不穩定
+### Unstable Data
 
-- 確認 Flex Sensor 固定穩固
-- 檢查電池供電穩定（電壓 > 3.3V）
-- 移動平均濾波會平滑短期波動
+- Ensure Flex Sensor is securely attached
+- Check battery power stability (voltage > 3.3V)
+- Moving average filter will smooth short-term fluctuations
 
-## 參考資料
+## References
 
-- [ESP32-C3 技術文件](https://www.espressif.com/en/products/socs/esp32-c3)
-- [Flex Sensor 使用指南](https://www.sparkfun.com/products/10264)
-- [MQTT 協定說明](https://mqtt.org/)
-- [PlatformIO 文件](https://docs.platformio.org/)
-- [FreeRTOS 官方文件](https://www.freertos.org/)
+- [ESP32-C3 Technical Documentation](https://www.espressif.com/en/products/socs/esp32-c3)
+- [Flex Sensor Usage Guide](https://www.sparkfun.com/products/10264)
+- [MQTT Protocol Documentation](https://mqtt.org/)
+- [PlatformIO Documentation](https://docs.platformio.org/)
+- [FreeRTOS Official Documentation](https://www.freertos.org/)
 
-## 授權
+## License
 
-本專案採用 MIT 授權條款。
+This project is licensed under the MIT License.
 
-## 作者
+## Authors
 
 Knee Drive Analysis Project Team
 
 ---
 
-**最後更新**: 2026-01-24
+**Last Updated**: 2026-01-24
