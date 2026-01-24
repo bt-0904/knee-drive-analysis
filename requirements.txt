@@ -1,0 +1,16 @@
+# Knee Drive Analysis - Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# Web UI
+streamlit>=1.30.0
+
+# Data Processing
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Visualization
+matplotlib>=3.7.0
+plotly>=5.18.0
+
+# MQTT (for mqtt_receiver.py)
+paho-mqtt>=1.6.1
