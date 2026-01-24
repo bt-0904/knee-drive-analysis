@@ -2,6 +2,8 @@
 
 > [English Version](README.md)
 
+🌐 **線上 Demo**: [https://knee-drive-analysis.streamlit.app/](https://knee-drive-analysis.streamlit.app/)
+
 ## 專案簡介
 
 本專案使用 **ESP32-C3** 與 **Flex Sensor（彎曲感測器）**，透過 **Wi-Fi + MQTT** 無線傳輸即時分析跑步時的膝蓋抬腿動作。系統可記錄大腿角度、膝蓋位置座標等數據，量化分析不同抬腿高度對跑步效率的影響。

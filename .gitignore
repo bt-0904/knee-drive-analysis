@@ -8,5 +8,4 @@
 include/README
 lib/README
 test/README
-*.csv
 *.png

@@ -2,6 +2,8 @@
 
 > [中文版 README](README_TW.md)
 
+🌐 **Live Demo**: [https://knee-drive-analysis.streamlit.app/](https://knee-drive-analysis.streamlit.app/)
+
 ## Overview
 
 This project uses an **ESP32-C3** microcontroller with a **Flex Sensor** to analyze knee drive motion during running via **Wi-Fi + MQTT** wireless transmission. The system records thigh angle and knee position coordinates to quantify how different knee lift heights affect running efficiency.
